@@ -1,12 +1,25 @@
 {
-  "name": "sls-app",
+  "name": "sls-properties",
   "version": "1.0.0",
   "main": "index.ts",
   "dependencies": {
-    "expo": "~57.0.24",
+    "@expo/vector-icons": "^15.0.2",
+    "@react-native-community/datetimepicker": "9.1.0",
+    "@react-navigation/bottom-tabs": "^7.19.2",
+    "@react-navigation/native": "^7.4.1",
+    "expo": "~57.0.27",
+    "expo-file-system": "~57.0.7",
+    "expo-font": "~57.0.4",
+    "expo-notifications": "~57.0.22",
+    "expo-print": "~57.0.2",
+    "expo-screen-orientation": "~57.0.2",
+    "expo-sharing": "~57.0.22",
+    "expo-sqlite": "~57.0.4",
     "expo-status-bar": "~57.0.1",
     "react": "19.2.3",
-    "react-native": "0.86.3"
+    "react-native": "0.86.3",
+    "react-native-safe-area-context": "~5.7.0",
+    "react-native-screens": "~4.26.0"
   },
   "devDependencies": {
     "@types/react": "~19.2.2",
