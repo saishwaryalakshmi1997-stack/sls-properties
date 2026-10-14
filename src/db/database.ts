@@ -1754,13 +1754,26 @@ export async function getAllPaymentsForProperty(propertyId: number): Promise<Pay
       'SELECT * FROM payments WHERE property_id = ? ORDER BY id DESC',
       [propertyId]
     );
+
+    let allTx: PaymentTransaction[] = [];
+    try {
+      allTx = await db.getAllAsync<PaymentTransaction>(
+        'SELECT * FROM payment_transactions WHERE property_id = ? ORDER BY id ASC',
+        [propertyId]
+      );
+    } catch {
+      allTx = [];
+    }
+
     return records.map((r) => {
       const total = r.total_amount || r.amount || 0;
       const paid = r.paid_amount !== undefined ? r.paid_amount : (r.status === 'Paid' ? total : 0);
+      const txs = allTx.filter((t) => t.payment_id === r.id);
       return {
         ...r,
         total_amount: total,
         paid_amount: paid,
+        transactions: txs,
       };
     });
   } catch (err) {

@@ -6,6 +6,11 @@
     "orientation": "default",
     "icon": "./assets/icon.png",
     "userInterfaceStyle": "light",
+    "splash": {
+      "image": "./assets/splash-icon.png",
+      "resizeMode": "contain",
+      "backgroundColor": "#6B2D3A"
+    },
     "ios": {
       "supportsTablet": true,
       "requireFullScreen": true
@@ -13,10 +18,8 @@
     "android": {
       "package": "com.slsproperties.app",
       "adaptiveIcon": {
-        "backgroundColor": "#E6F4FE",
-        "foregroundImage": "./assets/android-icon-foreground.png",
-        "backgroundImage": "./assets/android-icon-background.png",
-        "monochromeImage": "./assets/android-icon-monochrome.png"
+        "backgroundColor": "#6B2D3A",
+        "foregroundImage": "./assets/icon.png"
       },
       "predictiveBackGestureEnabled": false
     },
@@ -33,7 +36,22 @@
           "initialOrientation": "PORTRAIT"
         }
       ],
-      "expo-sharing"
+      "expo-sharing",
+      [
+        "expo-contacts",
+        {
+          "contactsPermission": "Allow SLS Properties to access your contacts to select tenant phone numbers."
+        }
+      ],
+      [
+        "expo-splash-screen",
+        {
+          "image": "./assets/splash-icon.png",
+          "imageWidth": 200,
+          "resizeMode": "contain",
+          "backgroundColor": "#6B2D3A"
+        }
+      ]
     ],
     "extra": {
       "eas": {

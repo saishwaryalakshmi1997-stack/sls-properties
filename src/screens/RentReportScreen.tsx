@@ -23,6 +23,7 @@ import {
   PropertyWithCounts,
   RentReportResult,
   RentReportMonthStatus,
+  RentReportMonthData,
   MONTH_SHORT,
   getPropertiesWithCounts,
   getRentReportForProperty,
@@ -34,6 +35,63 @@ const HEADER_HEIGHT = 40;
 const NAME_COL_WIDTH = 110;
 const FLAT_COL_WIDTH = 75;
 const MONTH_COL_WIDTH = 52;
+
+function formatReportPaymentDate(rawDate?: string): string {
+  if (!rawDate || !rawDate.trim()) return '';
+  const clean = rawDate.trim().replace(/^Paid\s+/i, '').trim();
+  if (!clean) return '';
+
+  // 1. Check DD-MM-YYYY or DD/MM/YYYY
+  const dmy = clean.match(/^(\d{1,2})[-/](\d{1,2})[-/](\d{2,4})$/);
+  if (dmy) {
+    const day = parseInt(dmy[1], 10);
+    const mIdx = parseInt(dmy[2], 10) - 1;
+    const mName = MONTH_SHORT[mIdx] || '';
+    return `${day} ${mName}`;
+  }
+
+  // 2. Check YYYY-MM-DD
+  const ymd = clean.match(/^(\d{4})[-/](\d{1,2})[-/](\d{1,2})/);
+  if (ymd) {
+    const day = parseInt(ymd[3], 10);
+    const mIdx = parseInt(ymd[2], 10) - 1;
+    const mName = MONTH_SHORT[mIdx] || '';
+    return `${day} ${mName}`;
+  }
+
+  // 3. Check "13 Oct 2026" or "13 Oct"
+  const wordMatch = clean.match(/^(\d{1,2})\s+([A-Za-z]{3,})/);
+  if (wordMatch) {
+    return `${wordMatch[1]} ${wordMatch[2].slice(0, 3)}`;
+  }
+
+  // 4. Fallback Date parsing
+  try {
+    const d = new Date(clean);
+    if (!isNaN(d.getTime())) {
+      const day = d.getDate();
+      const mName = MONTH_SHORT[d.getMonth()] || '';
+      return `${day} ${mName}`;
+    }
+  } catch { }
+
+  return clean;
+}
+
+function getMonthPaymentDate(monthData?: RentReportMonthData): string {
+  if (!monthData?.record) return '';
+  const rec = monthData.record;
+  if (rec.transactions && rec.transactions.length > 0) {
+    const lastTx = rec.transactions[rec.transactions.length - 1];
+    if (lastTx?.date_paid) {
+      return formatReportPaymentDate(lastTx.date_paid);
+    }
+  }
+  if (rec.date_paid) {
+    return formatReportPaymentDate(rec.date_paid);
+  }
+  return '';
+}
 
 function buildReportHtml(
   property: PropertyWithCounts,
@@ -66,11 +124,13 @@ function buildReportHtml(
         let due = 0;
         let cellText = '—';
         let cellClass = 'cell-upcoming';
+        let dateText = '';
 
         if (status === 'paid') {
           paid = monthData?.record?.paid_amount ?? totalAmount;
           cellText = paid > 0 && paid !== rent ? `₹${paid.toLocaleString('en-IN')}` : 'Paid';
           cellClass = 'cell-paid';
+          dateText = getMonthPaymentDate(monthData);
         } else if (status === 'not_paid') {
           due = totalAmount;
           cellText = 'Due';
@@ -80,6 +140,7 @@ function buildReportHtml(
           due = Math.max(0, totalAmount - paid);
           cellText = paid > 0 ? `₹${paid.toLocaleString('en-IN')}` : 'Part';
           cellClass = 'cell-partial';
+          dateText = getMonthPaymentDate(monthData);
         }
 
         tenantPaidTotal += paid;
@@ -87,7 +148,8 @@ function buildReportHtml(
         monthlyCollected[mIdx] += paid;
         monthlyDue[mIdx] += due;
 
-        return `<td class="${cellClass}">${cellText}</td>`;
+        const dateHtml = dateText ? `<div class="cell-date">${dateText}</div>` : '';
+        return `<td class="${cellClass}"><div class="cell-status">${cellText}</div>${dateHtml}</td>`;
       }).join('');
 
       overallTotalPaid += tenantPaidTotal;
@@ -213,10 +275,10 @@ function buildReportHtml(
     }
     td {
       border: 1px solid #e2e8f0;
-      padding: 5px 3px;
+      padding: 3px 2px;
       text-align: center;
       vertical-align: middle;
-      height: 26px;
+      height: 28px;
       font-size: 9px;
     }
     td.left-align {
@@ -239,10 +301,24 @@ function buildReportHtml(
       font-weight: 600;
       color: #475569;
     }
+    .cell-status {
+      font-weight: 700;
+      line-height: 1.1;
+    }
+    .cell-date {
+      font-size: 6.5px;
+      font-weight: 600;
+      margin-top: 1.5px;
+      line-height: 1;
+      letter-spacing: -0.2px;
+    }
     .cell-paid {
       background-color: #dcfce7 !important;
       color: #166534;
       font-weight: 700;
+    }
+    .cell-paid .cell-date {
+      color: #15803d;
     }
     .cell-due {
       background-color: #fee2e2 !important;
@@ -254,6 +330,9 @@ function buildReportHtml(
       color: #92400e;
       font-weight: 700;
       font-size: 8.5px;
+    }
+    .cell-partial .cell-date {
+      color: #b45309;
     }
     .cell-upcoming {
       background-color: #f8fafc;
@@ -640,12 +719,12 @@ export default function RentReportScreen() {
       loadProperties();
 
       if (selectedProperty) {
-        ScreenOrientation.lockAsync(ScreenOrientation.OrientationLock.LANDSCAPE).catch(() => {});
+        ScreenOrientation.lockAsync(ScreenOrientation.OrientationLock.LANDSCAPE).catch(() => { });
         navigation.setOptions({
           tabBarStyle: { display: 'none' },
         });
       } else {
-        ScreenOrientation.lockAsync(ScreenOrientation.OrientationLock.PORTRAIT_UP).catch(() => {});
+        ScreenOrientation.lockAsync(ScreenOrientation.OrientationLock.PORTRAIT_UP).catch(() => { });
         navigation.setOptions({
           tabBarStyle: undefined,
         });
@@ -653,7 +732,7 @@ export default function RentReportScreen() {
 
       return () => {
         // When leaving the screen / navigating to another tab, always restore portrait orientation
-        ScreenOrientation.lockAsync(ScreenOrientation.OrientationLock.PORTRAIT_UP).catch(() => {});
+        ScreenOrientation.lockAsync(ScreenOrientation.OrientationLock.PORTRAIT_UP).catch(() => { });
         navigation.setOptions({
           tabBarStyle: undefined,
         });
@@ -1134,11 +1213,14 @@ export default function RentReportScreen() {
                           {MONTH_SHORT.map((_, mIdx) => {
                             const mData = row.months[mIdx];
                             const status = mData?.status || 'upcoming';
+                            const payDate = getMonthPaymentDate(mData);
+                            const pAmt = mData?.record?.paid_amount ?? 0;
                             return (
                               <View key={mIdx} style={[styles.sheetTd, styles.sheetTdMonth, { width: 52 }]}>
                                 {status === 'paid' ? (
                                   <View style={styles.sheetChipPaid}>
                                     <Text style={styles.sheetChipPaidText}>✓ Paid</Text>
+                                    {payDate ? <Text style={styles.sheetChipPaidDate}>{payDate}</Text> : null}
                                   </View>
                                 ) : status === 'not_paid' ? (
                                   <View style={styles.sheetChipDue}>
@@ -1146,7 +1228,10 @@ export default function RentReportScreen() {
                                   </View>
                                 ) : status === 'partial' ? (
                                   <View style={styles.sheetChipPart}>
-                                    <Text style={styles.sheetChipPartText}>Part</Text>
+                                    <Text style={styles.sheetChipPartText}>
+                                      {pAmt > 0 ? `₹${pAmt.toLocaleString('en-IN')}` : 'Part'}
+                                    </Text>
+                                    {payDate ? <Text style={styles.sheetChipPartDate}>{payDate}</Text> : null}
                                   </View>
                                 ) : (
                                   <Text style={styles.sheetChipUpcomingText}>—</Text>
@@ -1223,127 +1308,141 @@ export default function RentReportScreen() {
   // VIEW 2: BUILDINGS LIST VIEW (When no building is selected)
   // -------------------------------------------------------------
   return (
-    <View style={[styles.container, { paddingTop: Math.max(insets.top, 12) + 6 }]}>
-      {/* Top Turquoise Header */}
-      <View style={styles.buildingHeader}>
-        <View>
-          <Text style={styles.buildingHeaderTitle}>Rent Reports</Text>
-          <Text style={styles.buildingHeaderSubtitle}>
-            Select a building to view monthly payment report
-          </Text>
+    <View style={styles.buildingsContainer}>
+      {/* Top Burgundy Header */}
+      <View style={[styles.buildingHeaderContainer, { paddingTop: Math.max(insets.top, 12) + 6 }]}>
+        <View style={styles.headerTopRow}>
+          <View style={styles.headerTitleArea}>
+            <Text style={styles.buildingHeaderTitle}>Rent Reports</Text>
+          </View>
+
+          <TouchableOpacity
+            style={styles.refreshHeaderBtn}
+            onPress={handleRefresh}
+            disabled={refreshing || loadingProperties}
+            activeOpacity={0.7}
+          >
+            {refreshing || loadingProperties ? (
+              <ActivityIndicator size="small" color="#FFFFFF" />
+            ) : (
+              <MaterialCommunityIcons name="refresh" size={20} color="#FFFFFF" />
+            )}
+          </TouchableOpacity>
         </View>
       </View>
 
-      {/* Buildings Content */}
-      {loadingProperties ? (
-        <View style={styles.centeredLoading}>
-          <ActivityIndicator size="large" color={Colors.primary} />
-          <Text style={styles.loadingPropertiesText}>Loading buildings...</Text>
-        </View>
-      ) : (
-        <ScrollView
-          style={styles.flex1}
-          contentContainerStyle={[styles.buildingsListContent, { paddingBottom: insets.bottom + 24 }]}
-          refreshControl={
-            <RefreshControl
-              refreshing={refreshing}
-              onRefresh={handleRefresh}
-              tintColor={Colors.primary}
-              colors={[Colors.primary]}
-            />
-          }
-        >
-          {properties.length === 0 ? (
-            <View style={styles.emptyBuildingsBox}>
-              <View style={styles.emptyIconCircle}>
-                <MaterialCommunityIcons
-                  name="office-building-outline"
-                  size={40}
-                  color={Colors.primary}
-                />
-              </View>
-              <Text style={styles.emptyBuildingsTitle}>No buildings found</Text>
-              <Text style={styles.emptyBuildingsSubtitle}>
-                Add a property first to track rent and view spreadsheets.
-              </Text>
-              <TouchableOpacity
-                style={styles.addPropertyBtn}
-                onPress={() => navigation.navigate('Add Property')}
-                activeOpacity={0.85}
-              >
-                <MaterialCommunityIcons name="plus-circle" size={18} color="#FFFFFF" />
-                <Text style={styles.addPropertyBtnText}>Add Property</Text>
-              </TouchableOpacity>
-            </View>
-          ) : (
-            <View style={styles.buildingsGrid}>
-              <Text style={styles.sectionHeading}>
-                All Buildings ({properties.length})
-              </Text>
-
-              {properties.map((prop) => (
+      {/* Main Content Rounded Container */}
+      <View style={styles.whiteContentContainer}>
+        {loadingProperties ? (
+          <View style={styles.centeredLoading}>
+            <ActivityIndicator size="large" color={Colors.primary} />
+            <Text style={styles.loadingPropertiesText}>Loading buildings...</Text>
+          </View>
+        ) : (
+          <ScrollView
+            style={styles.flex1}
+            contentContainerStyle={[styles.buildingsListContent, { paddingBottom: insets.bottom + 24 }]}
+            refreshControl={
+              <RefreshControl
+                refreshing={refreshing}
+                onRefresh={handleRefresh}
+                tintColor={Colors.primary}
+                colors={[Colors.primary]}
+              />
+            }
+          >
+            {properties.length === 0 ? (
+              <View style={styles.emptyBuildingsBox}>
+                <View style={styles.emptyIconCircle}>
+                  <MaterialCommunityIcons
+                    name="office-building-outline"
+                    size={40}
+                    color={Colors.primary}
+                  />
+                </View>
+                <Text style={styles.emptyBuildingsTitle}>No buildings found</Text>
+                <Text style={styles.emptyBuildingsSubtitle}>
+                  Add a property first to track rent and view spreadsheets.
+                </Text>
                 <TouchableOpacity
-                  key={`prop-${prop.id}`}
-                  style={styles.buildingCard}
-                  onPress={() => setSelectedProperty(prop)}
-                  activeOpacity={0.8}
+                  style={styles.addPropertyBtn}
+                  onPress={() => navigation.navigate('Add Property')}
+                  activeOpacity={0.85}
                 >
-                  <View style={styles.buildingCardLeft}>
-                    <View style={styles.buildingIconCircle}>
-                      <MaterialCommunityIcons
-                        name="office-building"
-                        size={24}
-                        color={Colors.primaryDark}
-                      />
-                    </View>
-                    <View style={styles.buildingCardTexts}>
-                      <Text style={styles.buildingNameText}>{prop.building_name}</Text>
-                      {prop.location ? (
-                        <View style={styles.buildingLocationRow}>
-                          <MaterialCommunityIcons
-                            name="map-marker-outline"
-                            size={14}
-                            color={Colors.textSecondary}
-                          />
-                          <Text style={styles.buildingLocationText} numberOfLines={1}>
-                            {prop.location}
-                          </Text>
-                        </View>
-                      ) : prop.building_address ? (
-                        <Text style={styles.buildingLocationText} numberOfLines={1}>
-                          {prop.building_address}
-                        </Text>
-                      ) : null}
+                  <MaterialCommunityIcons name="plus-circle" size={18} color="#FFFFFF" />
+                  <Text style={styles.addPropertyBtnText}>Add Property</Text>
+                </TouchableOpacity>
+              </View>
+            ) : (
+              <View style={styles.buildingsGrid}>
+                <Text style={styles.sectionHeading}>
+                  All Buildings ({properties.length})
+                </Text>
 
-                      {/* Badges */}
-                      <View style={styles.badgesRow}>
-                        <View style={styles.unitsBadge}>
-                          <Text style={styles.unitsBadgeText}>
-                            {prop.units} {prop.units === 1 ? 'Unit' : 'Units'}
+                {properties.map((prop) => (
+                  <TouchableOpacity
+                    key={`prop-${prop.id}`}
+                    style={styles.buildingCard}
+                    onPress={() => setSelectedProperty(prop)}
+                    activeOpacity={0.8}
+                  >
+                    <View style={styles.buildingCardLeft}>
+                      <View style={styles.buildingIconCircle}>
+                        <MaterialCommunityIcons
+                          name="office-building"
+                          size={24}
+                          color={Colors.primaryDark}
+                        />
+                      </View>
+                      <View style={styles.buildingCardTexts}>
+                        <Text style={styles.buildingNameText}>{prop.building_name}</Text>
+                        {prop.location ? (
+                          <View style={styles.buildingLocationRow}>
+                            <MaterialCommunityIcons
+                              name="map-marker-outline"
+                              size={14}
+                              color={Colors.textSecondary}
+                            />
+                            <Text style={styles.buildingLocationText} numberOfLines={1}>
+                              {prop.location}
+                            </Text>
+                          </View>
+                        ) : prop.building_address ? (
+                          <Text style={styles.buildingLocationText} numberOfLines={1}>
+                            {prop.building_address}
                           </Text>
-                        </View>
-                        <View style={styles.occupiedBadge}>
-                          <Text style={styles.occupiedBadgeText}>
-                            {prop.occupiedCount} Occupied
-                          </Text>
+                        ) : null}
+
+                        {/* Badges */}
+                        <View style={styles.badgesRow}>
+                          <View style={styles.unitsBadge}>
+                            <Text style={styles.unitsBadgeText}>
+                              {prop.units} {prop.units === 1 ? 'Unit' : 'Units'}
+                            </Text>
+                          </View>
+                          <View style={styles.occupiedBadge}>
+                            <Text style={styles.occupiedBadgeText}>
+                              {prop.occupiedCount} Occupied
+                            </Text>
+                          </View>
                         </View>
                       </View>
                     </View>
-                  </View>
 
-                  <View style={styles.buildingCardRight}>
-                    <MaterialCommunityIcons
-                      name="chevron-right"
-                      size={20}
-                      color="#94A3B8"
-                    />
-                  </View>
-                </TouchableOpacity>
-              ))}
-            </View>
-          )}
-        </ScrollView>
-      )}
+                    <View style={styles.buildingCardRight}>
+                      <MaterialCommunityIcons
+                        name="chevron-right"
+                        size={20}
+                        color="#94A3B8"
+                      />
+                    </View>
+                  </TouchableOpacity>
+                ))}
+              </View>
+            )}
+          </ScrollView>
+        )}
+      </View>
     </View>
   );
 }
@@ -1361,22 +1460,48 @@ const styles = StyleSheet.create({
   },
 
   // ---------------- BUILDINGS LIST STYLES ---------------- //
-  buildingHeader: {
-    paddingHorizontal: 20,
-    paddingBottom: 16,
-    borderBottomWidth: 1,
-    borderBottomColor: Colors.border,
-    backgroundColor: Colors.card,
+  buildingsContainer: {
+    flex: 1,
+    backgroundColor: Colors.primaryDeep,
+  },
+  buildingHeaderContainer: {
+    backgroundColor: Colors.primaryDeep,
+    paddingHorizontal: 16,
+    paddingBottom: 14,
+  },
+  headerTopRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+  },
+  headerTitleArea: {
+    flex: 1,
   },
   buildingHeaderTitle: {
     fontSize: 22,
     fontWeight: '800',
-    color: Colors.textPrimary,
+    color: '#FFFFFF',
   },
   buildingHeaderSubtitle: {
-    fontSize: 13,
-    color: Colors.textSecondary,
-    marginTop: 4,
+    fontSize: 12,
+    color: '#FCE7EA',
+    marginTop: 1,
+    fontWeight: '500',
+  },
+  refreshHeaderBtn: {
+    width: 36,
+    height: 36,
+    borderRadius: 18,
+    backgroundColor: 'rgba(255, 255, 255, 0.16)',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  whiteContentContainer: {
+    flex: 1,
+    backgroundColor: Colors.background,
+    borderTopLeftRadius: 20,
+    borderTopRightRadius: 20,
+    overflow: 'hidden',
   },
   centeredLoading: {
     flex: 1,
@@ -2095,21 +2220,29 @@ const styles = StyleSheet.create({
     paddingHorizontal: 4,
     paddingVertical: 2,
     borderRadius: 3,
+    alignItems: 'center',
   },
   sheetChipPaidText: {
     color: '#15803D',
-    fontSize: 9,
+    fontSize: 8.5,
     fontWeight: '800',
+  },
+  sheetChipPaidDate: {
+    color: '#15803D',
+    fontSize: 6.5,
+    fontWeight: '700',
+    marginTop: 1,
   },
   sheetChipDue: {
     backgroundColor: '#FEE2E2',
     paddingHorizontal: 4,
     paddingVertical: 2,
     borderRadius: 3,
+    alignItems: 'center',
   },
   sheetChipDueText: {
     color: '#B91C1C',
-    fontSize: 9,
+    fontSize: 8.5,
     fontWeight: '800',
   },
   sheetChipPart: {
@@ -2117,11 +2250,18 @@ const styles = StyleSheet.create({
     paddingHorizontal: 4,
     paddingVertical: 2,
     borderRadius: 3,
+    alignItems: 'center',
   },
   sheetChipPartText: {
     color: '#B45309',
-    fontSize: 9,
+    fontSize: 8.5,
     fontWeight: '800',
+  },
+  sheetChipPartDate: {
+    color: '#B45309',
+    fontSize: 6.5,
+    fontWeight: '700',
+    marginTop: 1,
   },
   sheetChipUpcomingText: {
     color: '#CBD5E1',

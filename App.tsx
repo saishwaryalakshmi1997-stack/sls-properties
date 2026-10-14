@@ -3,12 +3,22 @@ import { NavigationContainer } from '@react-navigation/native';
 import { SafeAreaProvider } from 'react-native-safe-area-context';
 import { StatusBar } from 'expo-status-bar';
 import * as ScreenOrientation from 'expo-screen-orientation';
+import * as SplashScreen from 'expo-splash-screen';
 import AppNavigator from './src/navigation/AppNavigator';
 import { ToastContainer } from './src/components/Toast';
 
+SplashScreen.preventAutoHideAsync().catch(() => {});
+
 export default function App() {
   useEffect(() => {
-    ScreenOrientation.lockAsync(ScreenOrientation.OrientationLock.PORTRAIT_UP).catch(() => {});
+    async function prepare() {
+      try {
+        await ScreenOrientation.lockAsync(ScreenOrientation.OrientationLock.PORTRAIT_UP).catch(() => {});
+      } finally {
+        await SplashScreen.hideAsync().catch(() => {});
+      }
+    }
+    prepare();
   }, []);
 
   return (

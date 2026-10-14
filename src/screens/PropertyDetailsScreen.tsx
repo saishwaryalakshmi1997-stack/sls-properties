@@ -13,6 +13,7 @@ import {
   Platform,
   BackHandler,
   Switch,
+  FlatList,
 } from 'react-native';
 import { MaterialCommunityIcons } from '@expo/vector-icons';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
@@ -35,6 +36,8 @@ import { Colors } from '../theme/colors';
 import TenantViewScreen from './TenantViewScreen';
 import AppDatePicker, { formatDateDisplay } from '../components/AppDatePicker';
 import FloatingLabelInput from '../components/FloatingLabelInput';
+import * as Contacts from 'expo-contacts';
+import { Contact, ContactField, ContactsSortOrder } from 'expo-contacts';
 
 interface PropertyDetailsScreenProps {
   property: Property;
@@ -142,6 +145,12 @@ export default function PropertyDetailsScreen({
   // Add / Edit Tenant modal state (with 2-step stepper matching screenshot)
   const [tenantModalVisible, setTenantModalVisible] = useState(false);
   const [tenantStep, setTenantStep] = useState<1 | 2>(1);
+
+  // In-app contacts phonebook picker states
+  const [contactsModalVisible, setContactsModalVisible] = useState(false);
+  const [contactsLoading, setContactsLoading] = useState(false);
+  const [allContacts, setAllContacts] = useState<{ id: string; name: string; phone: string }[]>([]);
+  const [contactSearchQuery, setContactSearchQuery] = useState('');
 
   // Step 1: Personal Details
   const [tenantFlatNumber, setTenantFlatNumber] = useState('');
@@ -421,6 +430,97 @@ export default function PropertyDetailsScreen({
       );
     }
   };
+
+  // Open in-app contacts picker directly (bypasses Android system file manager intent)
+  const handleOpenContactPicker = async () => {
+    try {
+      setContactsModalVisible(true);
+      setContactsLoading(true);
+      setContactSearchQuery('');
+
+      const { status } = await Contacts.requestPermissionsAsync();
+      if (status !== 'granted') {
+        setContactsModalVisible(false);
+        setContactsLoading(false);
+        Toast.warning(
+          'Permission Needed',
+          'Please allow contact access in device settings to select from your phonebook.'
+        );
+        return;
+      }
+
+      let rawList: any[] = [];
+      try {
+        rawList = await Contact.getAllDetails(
+          [ContactField.FULL_NAME, ContactField.PHONES],
+          { sortOrder: ContactsSortOrder.GivenName }
+        );
+      } catch (err) {
+        console.warn('Contact.getAllDetails failed, trying fallback:', err);
+        try {
+          const legacyRes = await Contacts.getContactsAsync({
+            fields: [Contacts.Fields?.PhoneNumbers || 'phoneNumbers'],
+          });
+          rawList = (legacyRes?.data || []).map((c: any) => ({
+            id: c.id,
+            fullName: c.name || `${c.firstName || ''} ${c.lastName || ''}`.trim(),
+            phones: c.phoneNumbers?.map((p: any) => ({ number: p.number })) || [],
+          }));
+        } catch (fallbackErr) {
+          console.error('All contact queries failed:', fallbackErr);
+        }
+      }
+
+      const items: { id: string; name: string; phone: string }[] = [];
+      for (const c of rawList) {
+        if (c.phones && c.phones.length > 0) {
+          const mainPhone = c.phones[0].number || '';
+          if (mainPhone.trim()) {
+            items.push({
+              id: String(c.id || Math.random()),
+              name: (c.fullName || '').trim() || 'Unknown Contact',
+              phone: mainPhone.trim(),
+            });
+          }
+        }
+      }
+
+      setAllContacts(items);
+    } catch (err: any) {
+      console.error('Error fetching contacts:', err);
+      Toast.error('Error', 'Unable to retrieve contacts from phonebook.');
+    } finally {
+      setContactsLoading(false);
+    }
+  };
+
+  // Select a contact from the in-app list
+  const handleSelectContactItem = (contact: { id: string; name: string; phone: string }) => {
+    const cleaned = contact.phone.replace(/[^0-9+]/g, '');
+    setTenantPhone(cleaned);
+    if (formErrors.phone) setFormErrors((p) => ({ ...p, phone: '' }));
+
+    // Auto-fill tenant name if currently empty
+    if (!tenantName.trim() && contact.name && contact.name !== 'Unknown Contact') {
+      setTenantName(contact.name);
+      if (formErrors.name) setFormErrors((p) => ({ ...p, name: '' }));
+    }
+
+    setContactsModalVisible(false);
+    Toast.success('Contact Selected', `${contact.name} (${cleaned})`);
+  };
+
+  // Filtered contacts based on search query
+  const filteredContacts = useMemo(() => {
+    if (!contactSearchQuery.trim()) return allContacts;
+    const q = contactSearchQuery.toLowerCase();
+    const qNum = contactSearchQuery.replace(/[^0-9]/g, '');
+    return allContacts.filter((c) => {
+      const matchName = c.name.toLowerCase().includes(q);
+      const matchPhone = qNum ? c.phone.replace(/[^0-9]/g, '').includes(qNum) : false;
+      return matchName || matchPhone;
+    });
+  }, [allContacts, contactSearchQuery]);
 
   // Validate Step 1 (Personal details)
   const validateStep1 = (): boolean => {
@@ -1211,8 +1311,9 @@ export default function PropertyDetailsScreen({
                     keyboardType="phone-pad"
                     error={formErrors.phone}
                     rightIcon={
-                      <MaterialCommunityIcons name="card-account-phone-outline" size={22} color="#1E293B" />
+                      <MaterialCommunityIcons name="card-account-phone-outline" size={22} color={Colors.primary} />
                     }
+                    onRightIconPress={handleOpenContactPicker}
                   />
 
                   {/* ID Proof Number - Animated Floating Label */}
@@ -1439,6 +1540,115 @@ export default function PropertyDetailsScreen({
             }}
             onClose={() => setActiveDatePicker(null)}
           />
+
+          {/* IN-APP CONTACTS PHONEBOOK PICKER MODAL */}
+          <Modal
+            visible={contactsModalVisible}
+            animationType="slide"
+            transparent={true}
+            onRequestClose={() => setContactsModalVisible(false)}
+          >
+            <View style={styles.contactsModalOverlay}>
+              <View style={[styles.contactsModalCard, { paddingBottom: Math.max(insets.bottom, 16) }]}>
+                {/* Drag indicator / Handle */}
+                <View style={styles.contactsModalHandle} />
+
+                {/* Header */}
+                <View style={styles.contactsModalHeader}>
+                  <View style={styles.contactsModalTitleCol}>
+                    <Text style={styles.contactsModalTitle}>Select from Contacts</Text>
+                    <Text style={styles.contactsModalSubtitle}>
+                      Choose a contact to import their phone number
+                    </Text>
+                  </View>
+                  <TouchableOpacity
+                    onPress={() => setContactsModalVisible(false)}
+                    style={styles.contactsModalCloseBtn}
+                    hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+                  >
+                    <MaterialCommunityIcons name="close" size={22} color="#64748B" />
+                  </TouchableOpacity>
+                </View>
+
+                {/* Search Input */}
+                <View style={styles.contactsSearchRow}>
+                  <MaterialCommunityIcons name="magnify" size={20} color="#94A3B8" />
+                  <TextInput
+                    style={styles.contactsSearchInput}
+                    placeholder="Search by name or number..."
+                    placeholderTextColor="#94A3B8"
+                    value={contactSearchQuery}
+                    onChangeText={setContactSearchQuery}
+                    autoCapitalize="none"
+                    autoCorrect={false}
+                  />
+                  {contactSearchQuery.length > 0 && (
+                    <TouchableOpacity onPress={() => setContactSearchQuery('')}>
+                      <MaterialCommunityIcons name="close-circle" size={18} color="#94A3B8" />
+                    </TouchableOpacity>
+                  )}
+                </View>
+
+                {/* Contacts List or Loading */}
+                {contactsLoading ? (
+                  <View style={styles.contactsLoadingWrap}>
+                    <ActivityIndicator size="large" color={Colors.primary} />
+                    <Text style={styles.contactsLoadingText}>Loading contacts from phonebook...</Text>
+                  </View>
+                ) : filteredContacts.length === 0 ? (
+                  <View style={styles.contactsEmptyWrap}>
+                    <MaterialCommunityIcons name="account-search-outline" size={48} color="#CBD5E1" />
+                    <Text style={styles.contactsEmptyTitle}>No Contacts Found</Text>
+                    <Text style={styles.contactsEmptySub}>
+                      {contactSearchQuery.trim()
+                        ? 'No contacts match your search.'
+                        : 'No contacts with phone numbers found on this phone.'}
+                    </Text>
+                  </View>
+                ) : (
+                  <FlatList
+                    data={filteredContacts}
+                    keyExtractor={(item, idx) => `${item.id}-${idx}`}
+                    keyboardShouldPersistTaps="handled"
+                    initialNumToRender={20}
+                    maxToRenderPerBatch={25}
+                    windowSize={10}
+                    ItemSeparatorComponent={() => <View style={styles.contactItemSeparator} />}
+                    renderItem={({ item }) => {
+                      const initials = item.name
+                        .split(' ')
+                        .map((w) => w[0])
+                        .filter(Boolean)
+                        .slice(0, 2)
+                        .join('')
+                        .toUpperCase() || '#';
+
+                      return (
+                        <TouchableOpacity
+                          style={styles.contactItemRow}
+                          onPress={() => handleSelectContactItem(item)}
+                          activeOpacity={0.7}
+                        >
+                          <View style={styles.contactAvatarCircle}>
+                            <Text style={styles.contactAvatarText}>{initials}</Text>
+                          </View>
+                          <View style={styles.contactInfoCol}>
+                            <Text style={styles.contactNameText} numberOfLines={1}>
+                              {item.name}
+                            </Text>
+                            <Text style={styles.contactPhoneText} numberOfLines={1}>
+                              {item.phone}
+                            </Text>
+                          </View>
+                          <MaterialCommunityIcons name="chevron-right" size={20} color="#CBD5E1" />
+                        </TouchableOpacity>
+                      );
+                    }}
+                  />
+                )}
+              </View>
+            </View>
+          </Modal>
         </KeyboardAvoidingView>
       </Modal>
     </View>
@@ -2900,5 +3110,142 @@ const styles = StyleSheet.create({
     fontSize: 14,
     fontWeight: '600',
     color: Colors.danger,
+  },
+  contactsModalOverlay: {
+    flex: 1,
+    backgroundColor: 'rgba(0, 0, 0, 0.45)',
+    justifyContent: 'flex-end',
+  },
+  contactsModalCard: {
+    backgroundColor: '#FFFFFF',
+    borderTopLeftRadius: 24,
+    borderTopRightRadius: 24,
+    height: '82%',
+    paddingTop: 10,
+    paddingHorizontal: 16,
+  },
+  contactsModalHandle: {
+    width: 40,
+    height: 4,
+    borderRadius: 2,
+    backgroundColor: '#E2E8F0',
+    alignSelf: 'center',
+    marginBottom: 10,
+  },
+  contactsModalHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    marginBottom: 14,
+  },
+  contactsModalTitleCol: {
+    flex: 1,
+  },
+  contactsModalTitle: {
+    fontSize: 18,
+    fontWeight: '800',
+    color: '#0F172A',
+  },
+  contactsModalSubtitle: {
+    fontSize: 12,
+    fontWeight: '500',
+    color: '#64748B',
+    marginTop: 2,
+  },
+  contactsModalCloseBtn: {
+    width: 32,
+    height: 32,
+    borderRadius: 16,
+    backgroundColor: '#F1F5F9',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  contactsSearchRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#F8FAFC',
+    borderWidth: 1,
+    borderColor: '#E2E8F0',
+    borderRadius: 12,
+    paddingHorizontal: 12,
+    paddingVertical: Platform.OS === 'ios' ? 10 : 6,
+    gap: 8,
+    marginBottom: 12,
+  },
+  contactsSearchInput: {
+    flex: 1,
+    fontSize: 14,
+    color: '#0F172A',
+    padding: 0,
+  },
+  contactsLoadingWrap: {
+    flex: 1,
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingVertical: 40,
+    gap: 12,
+  },
+  contactsLoadingText: {
+    fontSize: 14,
+    fontWeight: '500',
+    color: '#64748B',
+  },
+  contactsEmptyWrap: {
+    flex: 1,
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingVertical: 50,
+    gap: 8,
+  },
+  contactsEmptyTitle: {
+    fontSize: 16,
+    fontWeight: '700',
+    color: '#475569',
+  },
+  contactsEmptySub: {
+    fontSize: 13,
+    color: '#94A3B8',
+    textAlign: 'center',
+    maxWidth: 240,
+  },
+  contactItemSeparator: {
+    height: 1,
+    backgroundColor: '#F1F5F9',
+    marginLeft: 54,
+  },
+  contactItemRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingVertical: 12,
+    gap: 12,
+  },
+  contactAvatarCircle: {
+    width: 42,
+    height: 42,
+    borderRadius: 21,
+    backgroundColor: Colors.primaryTint,
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderWidth: 1,
+    borderColor: Colors.primaryBorder,
+  },
+  contactAvatarText: {
+    fontSize: 15,
+    fontWeight: '700',
+    color: Colors.primary,
+  },
+  contactInfoCol: {
+    flex: 1,
+  },
+  contactNameText: {
+    fontSize: 15,
+    fontWeight: '700',
+    color: '#0F172A',
+    marginBottom: 2,
+  },
+  contactPhoneText: {
+    fontSize: 13,
+    fontWeight: '500',
+    color: '#64748B',
   },
 });
