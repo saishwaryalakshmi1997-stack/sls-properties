@@ -238,70 +238,22 @@ export default function DashboardScreen() {
           </View>
 
 
-          {/* SQLite Status Card */}
-          <View style={styles.card}>
-            <View style={styles.cardHeader}>
-              <View style={styles.cardHeaderLeft}>
+          {/* Empty State when no properties exist yet */}
+          {recentProperties.length === 0 && !loading && (
+            <View style={styles.emptyContainer}>
+              <View style={styles.emptyIconCircle}>
                 <MaterialCommunityIcons
-                  name="database-check"
-                  size={22}
-                  color={dbStatus?.success ? Colors.primaryDark : Colors.danger}
+                  name="office-building-marker-outline"
+                  size={42}
+                  color={Colors.primaryDeep}
                 />
-                <Text style={styles.cardTitle}>Local Storage (SQLite)</Text>
               </View>
-              <TouchableOpacity
-                style={styles.refreshButton}
-                onPress={runTestAndLoad}
-                disabled={loading}
-              >
-                {loading ? (
-                  <ActivityIndicator size="small" color={Colors.primary} />
-                ) : (
-                  <MaterialCommunityIcons
-                    name="refresh"
-                    size={18}
-                    color={Colors.primaryDark}
-                  />
-                )}
-              </TouchableOpacity>
-            </View>
-
-            {loading ? (
-              <Text style={styles.statusDescription}>
-                Testing database read/write...
+              <Text style={styles.emptyTitle}>No Properties Added Yet</Text>
+              <Text style={styles.emptySubtitle}>
+                Tap "+ Add New Property" above to create your first building and start managing units and tenants.
               </Text>
-            ) : dbStatus?.success ? (
-              <View>
-                <View style={styles.statusPillSuccess}>
-                  <MaterialCommunityIcons
-                    name="check-circle"
-                    size={16}
-                    color="#059669"
-                  />
-                  <Text style={styles.statusPillTextSuccess}>
-                    SQLite Connected & Active
-                  </Text>
-                </View>
-                <Text style={styles.dbDetails}>
-                  Database: <Text style={styles.boldText}>sls_properties.db</Text>
-                </Text>
-                <Text style={styles.dbDetails}>
-                  Table: <Text style={styles.boldText}>properties</Text> ({stats.totalProperties} items stored)
-                </Text>
-              </View>
-            ) : (
-              <View style={styles.statusPillDanger}>
-                <MaterialCommunityIcons
-                  name="alert-circle"
-                  size={16}
-                  color="#DC2626"
-                />
-                <Text style={styles.statusPillTextDanger}>
-                  Error: {dbStatus?.error || 'Database test failed'}
-                </Text>
-              </View>
-            )}
-          </View>
+            </View>
+          )}
         </ScrollView>
       </View>
     </View>
@@ -526,80 +478,39 @@ const styles = StyleSheet.create({
     color: Colors.textSecondary,
     flex: 1,
   },
-  card: {
-    backgroundColor: Colors.card,
-    borderRadius: 14,
-    padding: 16,
-    borderWidth: 1,
-    borderColor: Colors.border,
+  emptyContainer: {
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingVertical: 36,
+    paddingHorizontal: 24,
+    backgroundColor: '#FAFAF9',
+    borderRadius: 16,
+    borderWidth: 1.5,
+    borderColor: '#E7E5E4',
+    borderStyle: 'dashed',
+    marginTop: 8,
     marginBottom: 20,
-    shadowColor: '#0F172A',
-    shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.03,
-    shadowRadius: 4,
-    elevation: 1,
   },
-  cardHeader: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
+  emptyIconCircle: {
+    width: 72,
+    height: 72,
+    borderRadius: 36,
+    backgroundColor: Colors.primaryTint,
     alignItems: 'center',
-    marginBottom: 12,
+    justifyContent: 'center',
+    marginBottom: 14,
   },
-  cardHeaderLeft: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 8,
-  },
-  cardTitle: {
-    fontSize: 15,
+  emptyTitle: {
+    fontSize: 16,
     fontWeight: '700',
     color: Colors.textPrimary,
+    marginBottom: 6,
+    textAlign: 'center',
   },
-  refreshButton: {
-    padding: 4,
-  },
-  statusDescription: {
+  emptySubtitle: {
     fontSize: 13,
     color: Colors.textSecondary,
-  },
-  statusPillSuccess: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 6,
-    backgroundColor: '#ECFDF5',
-    paddingHorizontal: 10,
-    paddingVertical: 5,
-    borderRadius: 6,
-    alignSelf: 'flex-start',
-    marginBottom: 10,
-  },
-  statusPillTextSuccess: {
-    color: '#065F46',
-    fontWeight: '600',
-    fontSize: 13,
-  },
-  statusPillDanger: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 6,
-    backgroundColor: '#FEF2F2',
-    paddingHorizontal: 10,
-    paddingVertical: 5,
-    borderRadius: 6,
-    alignSelf: 'flex-start',
-  },
-  statusPillTextDanger: {
-    color: '#991B1B',
-    fontWeight: '600',
-    fontSize: 13,
-  },
-  dbDetails: {
-    fontSize: 13,
-    color: Colors.textSecondary,
-    marginTop: 4,
-  },
-  boldText: {
-    fontWeight: '600',
-    color: Colors.textPrimary,
+    textAlign: 'center',
+    lineHeight: 18,
   },
 });
