@@ -24,9 +24,12 @@ import {
   RentReportResult,
   RentReportMonthStatus,
   RentReportMonthData,
+  ConsolidatedRentReportResult,
+  ConsolidatedBuildingReport,
   MONTH_SHORT,
   getPropertiesWithCounts,
   getRentReportForProperty,
+  getAllBuildingsRentReport,
 } from '../db/database';
 import { syncAll } from '../db/sync';
 import { Colors } from '../theme/colors';
@@ -475,6 +478,577 @@ function buildReportHtml(
 // Backward compatibility alias
 const generateReportHtml = buildReportHtml;
 
+function buildConsolidatedReportHtml(
+  year: number,
+  consolidated: ConsolidatedRentReportResult
+): string {
+  const generatedDate = new Date().toLocaleDateString('en-IN', {
+    day: '2-digit',
+    month: 'short',
+    year: 'numeric',
+  });
+
+  // 1. Executive Summary Table Rows for each building
+  const overviewRowsHtml = consolidated.buildings
+    .map((b, idx) => {
+      const p = b.property;
+      const rowBg = idx % 2 === 0 ? '#ffffff' : '#f8fafc';
+      return `
+        <tr style="background-color: ${rowBg};">
+          <td style="text-align: center; font-weight: 700;">${idx + 1}</td>
+          <td class="left-align" style="font-weight: 700; color: #701A24;">${p.building_name}</td>
+          <td class="left-align" style="color: #64748b;">${p.location || p.building_address || '—'}</td>
+          <td style="text-align: center; font-weight: 600;">${p.units || '—'}</td>
+          <td style="text-align: center; font-weight: 600;">${b.report.rows.length}</td>
+          <td class="right-align total-paid-col">₹${b.totalPaid.toLocaleString('en-IN')}</td>
+          <td class="right-align total-pending-col ${b.totalPending > 0 ? 'pending-alert' : ''}">${b.totalPending > 0 ? `₹${b.totalPending.toLocaleString('en-IN')}` : '—'}</td>
+        </tr>
+      `;
+    })
+    .join('');
+
+  // 2. Month-by-month portfolio totals cells
+  const portfolioMonthlyCells = MONTH_SHORT.map((_, mIdx) => {
+    const colAmt = consolidated.monthlyCollected[mIdx];
+    return `<td class="totals-col">${colAmt > 0 ? `₹${colAmt.toLocaleString('en-IN')}` : '—'}</td>`;
+  }).join('');
+
+  // 3. Detailed sections for each building
+  const buildingSectionsHtml = consolidated.buildings
+    .map((b, bIdx) => {
+      const p = b.property;
+      const tenantRowsHtml =
+        b.report.rows.length === 0
+          ? `<tr><td colspan="16" style="text-align: center; color: #94a3b8; padding: 12px; font-style: italic;">No active tenants registered in ${p.building_name} for ${year}</td></tr>`
+          : b.report.rows
+            .map((row, idx) => {
+              let tenantPaidTotal = 0;
+              let tenantPendingTotal = 0;
+
+              const monthCells = MONTH_SHORT.map((_, mIdx) => {
+                const monthData = row.months[mIdx];
+                const status = monthData?.status || 'upcoming';
+                const rent = row.tenant.rent_amount || 0;
+                const totalAmount =
+                  monthData?.record?.total_amount ?? monthData?.record?.amount ?? rent;
+
+                let paid = 0;
+                let due = 0;
+                let cellText = '—';
+                let cellClass = 'cell-upcoming';
+                let dateText = '';
+
+                if (status === 'paid') {
+                  paid = monthData?.record?.paid_amount ?? totalAmount;
+                  cellText = paid > 0 && paid !== rent ? `₹${paid.toLocaleString('en-IN')}` : 'Paid';
+                  cellClass = 'cell-paid';
+                  dateText = getMonthPaymentDate(monthData);
+                } else if (status === 'not_paid') {
+                  due = totalAmount;
+                  cellText = 'Due';
+                  cellClass = 'cell-due';
+                } else if (status === 'partial') {
+                  paid = monthData?.record?.paid_amount ?? 0;
+                  due = Math.max(0, totalAmount - paid);
+                  cellText = paid > 0 ? `₹${paid.toLocaleString('en-IN')}` : 'Part';
+                  cellClass = 'cell-partial';
+                  dateText = getMonthPaymentDate(monthData);
+                }
+
+                tenantPaidTotal += paid;
+                tenantPendingTotal += due;
+
+                const dateHtml = dateText ? `<div class="cell-date">${dateText}</div>` : '';
+                return `<td class="${cellClass}"><div class="cell-status">${cellText}</div>${dateHtml}</td>`;
+              }).join('');
+
+              const rowBg = idx % 2 === 0 ? '#ffffff' : '#f8fafc';
+              return `
+                  <tr style="background-color: ${rowBg};">
+                    <td class="left-align tenant-name" title="${row.tenant.name || 'Tenant'}">${row.tenant.name || 'Tenant'}</td>
+                    <td class="flat-num">${row.displayFlat}</td>
+                    ${monthCells}
+                    <td class="right-align total-paid-col">₹${tenantPaidTotal.toLocaleString('en-IN')}</td>
+                    <td class="right-align total-pending-col ${tenantPendingTotal > 0 ? 'pending-alert' : ''}">${tenantPendingTotal > 0 ? `₹${tenantPendingTotal.toLocaleString('en-IN')}` : '—'}</td>
+                  </tr>
+                `;
+            })
+            .join('');
+
+      const buildingMonthlyCells = MONTH_SHORT.map((_, mIdx) => {
+        const amt = b.monthlyCollected[mIdx];
+        return `<td class="totals-col">${amt > 0 ? `₹${amt.toLocaleString('en-IN')}` : '—'}</td>`;
+      }).join('');
+
+      return `
+        <div class="building-section">
+          <div class="building-section-header">
+            <div class="building-section-title">
+              <span class="building-idx">#${bIdx + 1}</span>
+              <span class="building-name">${p.building_name}</span>
+              ${p.location || p.building_address ? `<span class="building-loc">• ${p.location || p.building_address}</span>` : ''}
+              <span class="building-units-pill">${p.units || 1} Units • ${b.report.rows.length} Active Tenants</span>
+            </div>
+            <div class="building-subtotals-pill">
+              <span>Collected: <strong class="green">₹${b.totalPaid.toLocaleString('en-IN')}</strong></span>
+              <span style="margin: 0 4px; color: #cbd5e1;">|</span>
+              <span>Pending: <strong class="${b.totalPending > 0 ? 'red' : ''}">${b.totalPending > 0 ? `₹${b.totalPending.toLocaleString('en-IN')}` : '₹0'}</strong></span>
+            </div>
+          </div>
+
+          <table>
+            <thead>
+              <tr>
+                <th class="left-align" style="width: 14%;">Tenant Name</th>
+                <th style="width: 7%;">Flat</th>
+                ${MONTH_SHORT.map((m) => `<th style="width: 4.8%;">${m}</th>`).join('')}
+                <th class="right-align" style="width: 10.7%;">Total Paid</th>
+                <th class="right-align" style="width: 10.7%;">Pending</th>
+              </tr>
+            </thead>
+            <tbody>
+              ${tenantRowsHtml}
+            </tbody>
+            <tfoot>
+              <tr class="totals-row">
+                <td class="left-align" style="font-weight: 800;">Building Subtotal</td>
+                <td style="color: #64748b;">—</td>
+                ${buildingMonthlyCells}
+                <td class="right-align" style="color: #166534; font-weight: 800;">₹${b.totalPaid.toLocaleString('en-IN')}</td>
+                <td class="right-align" style="color: ${b.totalPending > 0 ? '#991b1b' : '#64748b'}; font-weight: 800;">${b.totalPending > 0 ? `₹${b.totalPending.toLocaleString('en-IN')}` : '—'}</td>
+              </tr>
+            </tfoot>
+          </table>
+        </div>
+      `;
+    })
+    .join('');
+
+  return `
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>SLS Properties - All Buildings Rent Report (${year})</title>
+  <style>
+    @page {
+      size: A4 landscape;
+      margin: 10mm;
+    }
+    * {
+      box-sizing: border-box;
+      -webkit-print-color-adjust: exact;
+      print-color-adjust: exact;
+    }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+      color: #0f172a;
+      background: #ffffff;
+      margin: 0;
+      padding: 0;
+      font-size: 9px;
+    }
+    .header-box {
+      display: flex;
+      justify-content: space-between;
+      align-items: flex-end;
+      border-bottom: 2.5px solid #701A24;
+      padding-bottom: 10px;
+      margin-bottom: 14px;
+    }
+    .brand-title {
+      font-size: 18px;
+      font-weight: 800;
+      color: #701A24;
+      margin: 0 0 3px 0;
+      letter-spacing: -0.3px;
+    }
+    .sub-line {
+      font-size: 10px;
+      color: #64748b;
+      margin: 0;
+    }
+    .summary-strip {
+      display: flex;
+      gap: 8px;
+      flex-wrap: wrap;
+    }
+    .summary-pill {
+      background: #f8fafc;
+      border: 1px solid #e2e8f0;
+      border-radius: 6px;
+      padding: 4px 8px;
+      font-size: 9px;
+      color: #475569;
+    }
+    .summary-pill strong {
+      color: #0f172a;
+    }
+    .summary-pill strong.green {
+      color: #166534;
+    }
+    .summary-pill strong.red {
+      color: #991b1b;
+    }
+    .executive-card {
+      background: #ffffff;
+      border: 1px solid #cbd5e1;
+      border-radius: 8px;
+      padding: 10px 12px;
+      margin-bottom: 18px;
+      page-break-inside: avoid;
+    }
+    .executive-title {
+      font-size: 11px;
+      font-weight: 800;
+      color: #1e293b;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+      margin-bottom: 8px;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+    .building-section {
+      margin-bottom: 18px;
+      page-break-inside: avoid;
+    }
+    .building-section-header {
+      background: #f8fafc;
+      border: 1px solid #cbd5e1;
+      border-bottom: none;
+      border-top-left-radius: 6px;
+      border-top-right-radius: 6px;
+      padding: 6px 10px;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+    .building-section-title {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+    .building-idx {
+      background: #701A24;
+      color: #ffffff;
+      font-weight: 800;
+      font-size: 8.5px;
+      padding: 2px 5px;
+      border-radius: 4px;
+    }
+    .building-name {
+      font-size: 11px;
+      font-weight: 800;
+      color: #0f172a;
+    }
+    .building-loc {
+      font-size: 9px;
+      color: #64748b;
+    }
+    .building-units-pill {
+      background: #e2e8f0;
+      color: #334155;
+      font-size: 8px;
+      font-weight: 700;
+      padding: 2px 6px;
+      border-radius: 4px;
+      margin-left: 4px;
+    }
+    .building-subtotals-pill {
+      font-size: 9px;
+      color: #475569;
+    }
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      table-layout: fixed;
+      font-size: 8.5px;
+    }
+    thead {
+      display: table-header-group;
+    }
+    tfoot {
+      display: table-footer-group;
+    }
+    tr {
+      page-break-inside: avoid;
+    }
+    th {
+      background-color: #f1f5f9;
+      color: #334155;
+      font-weight: 700;
+      font-size: 8px;
+      text-transform: uppercase;
+      letter-spacing: 0.3px;
+      border: 1px solid #cbd5e1;
+      padding: 5px 2px;
+      text-align: center;
+    }
+    th.left-align {
+      text-align: left;
+      padding-left: 6px;
+    }
+    th.right-align {
+      text-align: right;
+      padding-right: 6px;
+    }
+    td {
+      border: 1px solid #e2e8f0;
+      padding: 3px 2px;
+      text-align: center;
+      vertical-align: middle;
+      height: 26px;
+      font-size: 8.5px;
+    }
+    td.left-align {
+      text-align: left;
+      padding-left: 6px;
+    }
+    td.right-align {
+      text-align: right;
+      padding-right: 6px;
+    }
+    .tenant-name {
+      font-weight: 600;
+      color: #0f172a;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      max-width: 110px;
+    }
+    .flat-num {
+      font-weight: 600;
+      color: #475569;
+    }
+    .cell-status {
+      font-weight: 700;
+      line-height: 1.1;
+    }
+    .cell-date {
+      font-size: 6px;
+      font-weight: 600;
+      margin-top: 1px;
+      line-height: 1;
+      letter-spacing: -0.2px;
+    }
+    .cell-paid {
+      background-color: #dcfce7 !important;
+      color: #166534;
+      font-weight: 700;
+    }
+    .cell-paid .cell-date {
+      color: #15803d;
+    }
+    .cell-due {
+      background-color: #fee2e2 !important;
+      color: #991b1b;
+      font-weight: 700;
+    }
+    .cell-partial {
+      background-color: #fef3c7 !important;
+      color: #92400e;
+      font-weight: 700;
+      font-size: 8px;
+    }
+    .cell-partial .cell-date {
+      color: #b45309;
+    }
+    .cell-upcoming {
+      background-color: #f8fafc;
+      color: #94a3b8;
+    }
+    .total-paid-col {
+      font-weight: 700;
+      color: #166534;
+    }
+    .total-pending-col {
+      font-weight: 600;
+      color: #64748b;
+    }
+    .total-pending-col.pending-alert {
+      color: #991b1b;
+      font-weight: 700;
+    }
+    .totals-row td {
+      background-color: #f1f5f9 !important;
+      font-weight: 800;
+      color: #0f172a;
+      border-top: 2px solid #94a3b8;
+      border-bottom: 2px solid #94a3b8;
+      font-size: 8.5px;
+    }
+    .totals-col {
+      font-size: 8px;
+      font-weight: 700;
+    }
+    .grand-totals-card {
+      background: #faf5ff;
+      border: 2px solid #701A24;
+      border-radius: 8px;
+      padding: 10px 14px;
+      margin-top: 20px;
+      page-break-inside: avoid;
+    }
+    .grand-totals-header {
+      font-size: 12px;
+      font-weight: 800;
+      color: #701A24;
+      margin-bottom: 8px;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+    .legend-box {
+      display: flex;
+      align-items: center;
+      gap: 16px;
+      margin-top: 14px;
+      padding: 6px 12px;
+      background: #f8fafc;
+      border: 1px solid #e2e8f0;
+      border-radius: 6px;
+      font-size: 8.5px;
+      color: #475569;
+      page-break-inside: avoid;
+    }
+    .legend-item {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+    .legend-chip {
+      display: inline-block;
+      padding: 2px 6px;
+      border-radius: 3px;
+      font-size: 8px;
+      font-weight: 700;
+    }
+    .chip-paid {
+      background: #dcfce7;
+      color: #166534;
+      border: 1px solid #bbf7d0;
+    }
+    .chip-due {
+      background: #fee2e2;
+      color: #991b1b;
+      border: 1px solid #fecaca;
+    }
+    .chip-partial {
+      background: #fef3c7;
+      color: #92400e;
+      border: 1px solid #fde68a;
+    }
+    .chip-upcoming {
+      background: #f8fafc;
+      color: #94a3b8;
+      border: 1px solid #e2e8f0;
+    }
+    .footer {
+      display: flex;
+      justify-content: space-between;
+      margin-top: 12px;
+      padding-top: 6px;
+      border-top: 1px solid #e2e8f0;
+      font-size: 8px;
+      color: #94a3b8;
+    }
+  </style>
+</head>
+<body>
+  <div class="header-box">
+    <div>
+      <h1 class="brand-title">SLS Properties — Portfolio Consolidated Rent Report (${year})</h1>
+      <p class="sub-line">Generated on ${generatedDate} • Complete Multi-Property Annual Statement</p>
+    </div>
+    <div class="summary-strip">
+      <div class="summary-pill">Total Buildings: <strong>${consolidated.buildings.length}</strong></div>
+      <div class="summary-pill">Total Units: <strong>${consolidated.totalUnits}</strong></div>
+      <div class="summary-pill">Total Tenants: <strong>${consolidated.totalTenants}</strong></div>
+      <div class="summary-pill">Portfolio Collected: <strong class="green">₹${consolidated.totalPaid.toLocaleString('en-IN')}</strong></div>
+      <div class="summary-pill">Portfolio Pending: <strong class="red">₹${consolidated.totalPending.toLocaleString('en-IN')}</strong></div>
+    </div>
+  </div>
+
+  <!-- Executive Summary Overview Table -->
+  <div class="executive-card">
+    <div class="executive-title">
+      <span>Property Portfolio Summary</span>
+      <span style="font-size: 9px; color: #64748b; font-weight: 500;">Year ${year}</span>
+    </div>
+    <table>
+      <thead>
+        <tr>
+          <th style="width: 5%;">#</th>
+          <th class="left-align" style="width: 25%;">Property Name</th>
+          <th class="left-align" style="width: 28%;">Location / Address</th>
+          <th style="width: 8%;">Units</th>
+          <th style="width: 8%;">Tenants</th>
+          <th class="right-align" style="width: 13%;">Total Collected</th>
+          <th class="right-align" style="width: 13%;">Pending Dues</th>
+        </tr>
+      </thead>
+      <tbody>
+        ${overviewRowsHtml}
+      </tbody>
+      <tfoot>
+        <tr class="totals-row">
+          <td colspan="3" class="left-align" style="font-weight: 800;">PORTFOLIO TOTAL (${consolidated.buildings.length} PROPERTIES)</td>
+          <td style="font-weight: 800; text-align: center;">${consolidated.totalUnits}</td>
+          <td style="font-weight: 800; text-align: center;">${consolidated.totalTenants}</td>
+          <td class="right-align" style="color: #166534; font-weight: 800;">₹${consolidated.totalPaid.toLocaleString('en-IN')}</td>
+          <td class="right-align" style="color: ${consolidated.totalPending > 0 ? '#991b1b' : '#64748b'}; font-weight: 800;">${consolidated.totalPending > 0 ? `₹${consolidated.totalPending.toLocaleString('en-IN')}` : '—'}</td>
+        </tr>
+      </tfoot>
+    </table>
+  </div>
+
+  <!-- Detailed Property Statements -->
+  ${buildingSectionsHtml}
+
+  <!-- Grand Portfolio Monthly Summary Row -->
+  <div class="grand-totals-card">
+    <div class="grand-totals-header">
+      <span>PORTFOLIO MONTHLY TOTALS (ALL BUILDINGS COMBINED)</span>
+      <span>Annual Total: ₹${consolidated.totalPaid.toLocaleString('en-IN')}</span>
+    </div>
+    <table>
+      <thead>
+        <tr>
+          <th class="left-align" style="width: 21%;">Metric</th>
+          ${MONTH_SHORT.map((m) => `<th style="width: 4.8%;">${m}</th>`).join('')}
+          <th class="right-align" style="width: 10.7%;">Total Paid</th>
+          <th class="right-align" style="width: 10.7%;">Total Pending</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr class="totals-row">
+          <td class="left-align" style="font-weight: 800; color: #701A24;">Monthly Collections</td>
+          ${portfolioMonthlyCells}
+          <td class="right-align" style="color: #166534; font-weight: 800;">₹${consolidated.totalPaid.toLocaleString('en-IN')}</td>
+          <td class="right-align" style="color: ${consolidated.totalPending > 0 ? '#991b1b' : '#64748b'}; font-weight: 800;">${consolidated.totalPending > 0 ? `₹${consolidated.totalPending.toLocaleString('en-IN')}` : '—'}</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="legend-box">
+    <strong>Legend:</strong>
+    <span class="legend-item"><span class="legend-chip chip-paid">Paid</span> Paid in Full</span>
+    <span class="legend-item"><span class="legend-chip chip-due">Due</span> Unpaid / Overdue</span>
+    <span class="legend-item"><span class="legend-chip chip-partial">₹ Amt</span> Partial Payment</span>
+    <span class="legend-item"><span class="legend-chip chip-upcoming">-</span> Not Started / Upcoming</span>
+  </div>
+
+  <div class="footer">
+    <span>Confidential • SLS Properties Complete Portfolio Rent Statement (${year})</span>
+    <span>Generated via SLS Rent App</span>
+  </div>
+</body>
+</html>
+  `;
+}
+
 export default function RentReportScreen() {
   const navigation = useNavigation<any>();
   const route = useRoute<any>();
@@ -486,11 +1060,14 @@ export default function RentReportScreen() {
 
   // Selected property & year
   const [selectedProperty, setSelectedProperty] = useState<PropertyWithCounts | null>(null);
+  const [isAllBuildings, setIsAllBuildings] = useState(false);
   const [selectedYear, setSelectedYear] = useState<number>(new Date().getFullYear());
+  const [selectedBuildingFilter, setSelectedBuildingFilter] = useState<number | 'all'>('all');
 
   // Report data
   const [loadingReport, setLoadingReport] = useState(false);
   const [reportData, setReportData] = useState<RentReportResult | null>(null);
+  const [consolidatedReport, setConsolidatedReport] = useState<ConsolidatedRentReportResult | null>(null);
   const [isExportingPdf, setIsExportingPdf] = useState(false);
 
   // In-App PDF Document Viewer states
@@ -501,6 +1078,14 @@ export default function RentReportScreen() {
 
   // Computed summary totals for the Document Viewer
   const viewerTotals = React.useMemo(() => {
+    if (isAllBuildings && consolidatedReport) {
+      return {
+        collected: consolidatedReport.monthlyCollected,
+        due: consolidatedReport.monthlyDue,
+        totalPaid: consolidatedReport.totalPaid,
+        totalDue: consolidatedReport.totalPending,
+      };
+    }
     if (!reportData) return { collected: new Array(12).fill(0), due: new Array(12).fill(0), totalPaid: 0, totalDue: 0 };
     const collected = new Array(12).fill(0);
     const due = new Array(12).fill(0);
@@ -532,9 +1117,9 @@ export default function RentReportScreen() {
     });
 
     return { collected, due, totalPaid, totalDue };
-  }, [reportData]);
+  }, [isAllBuildings, consolidatedReport, reportData]);
 
-  // Download PDF handler
+  // Download PDF handler for a single property
   const handleDownloadPdf = async () => {
     if (!selectedProperty || !reportData) {
       Toast.info('No Data', 'No report data available to download.');
@@ -631,18 +1216,111 @@ export default function RentReportScreen() {
     }
   };
 
+  // Download PDF handler for All Buildings in one consolidated report
+  const handleDownloadAllBuildingsPdf = async () => {
+    if (properties.length === 0) {
+      Toast.info('No Properties', 'No properties available to generate report for.');
+      return;
+    }
+    try {
+      setIsExportingPdf(true);
+      const data = consolidatedReport || (await getAllBuildingsRentReport(selectedYear));
+      if (!consolidatedReport) {
+        setConsolidatedReport(data);
+      }
+
+      const html = buildConsolidatedReportHtml(selectedYear, data);
+
+      const printResult = await Print.printToFileAsync({
+        html,
+        width: 842,
+        height: 595,
+        base64: true,
+      });
+
+      const fileName = `Rent-Report_All_Buildings_${selectedYear}.pdf`;
+      const base64 = printResult.base64;
+
+      let savedToDocuments = false;
+      let finalFileUri = printResult.uri;
+
+      // 1. Save locally to app documents directory
+      try {
+        if (FileSystem?.documentDirectory && FileSystem?.writeAsStringAsync && base64) {
+          const localUri = `${FileSystem.documentDirectory}${fileName}`;
+          await FileSystem.writeAsStringAsync(localUri, base64, {
+            encoding: FileSystem.EncodingType.Base64,
+          });
+          finalFileUri = localUri;
+        }
+      } catch (saveLocalErr) {
+        console.warn('[RentReport] Local document save warning:', saveLocalErr);
+      }
+
+      // 2. On Android, save directly into public Documents/Downloads folder
+      if (
+        Platform.OS === 'android' &&
+        base64 &&
+        FileSystem?.StorageAccessFramework?.requestDirectoryPermissionsAsync &&
+        FileSystem?.StorageAccessFramework?.createFileAsync
+      ) {
+        try {
+          const permissions = await FileSystem.StorageAccessFramework.requestDirectoryPermissionsAsync();
+          if (permissions.granted) {
+            const safFileUri = await FileSystem.StorageAccessFramework.createFileAsync(
+              permissions.directoryUri,
+              `Rent-Report_All_Buildings_${selectedYear}`,
+              'application/pdf'
+            );
+            await FileSystem.writeAsStringAsync(safFileUri, base64, {
+              encoding: FileSystem.EncodingType.Base64,
+            });
+            savedToDocuments = true;
+          }
+        } catch (safErr) {
+          console.warn('[RentReport] StorageAccessFramework save error/cancel:', safErr);
+        }
+      }
+
+      setDownloadedFileName(fileName);
+      setDownloadedFileUri(finalFileUri);
+
+      Toast.show({
+        type: 'success',
+        title: 'PDF Downloaded',
+        message: savedToDocuments
+          ? `Saved to Documents: ${fileName}`
+          : fileName,
+        duration: 9000,
+        action: {
+          label: 'View',
+          onPress: () => {
+            setIsPdfViewerOpen(true);
+          },
+        },
+      });
+    } catch (err: any) {
+      console.error('[RentReport] All Buildings PDF Export error:', err);
+      Toast.error('PDF Export Error', err?.message || 'Could not generate consolidated PDF.');
+    } finally {
+      setIsExportingPdf(false);
+    }
+  };
+
   // Return back to buildings list and lock back to portrait
   const handleBackToBuildings = useCallback(async () => {
     setSelectedProperty(null);
-    if (route.params?.propertyId) {
-      navigation.setParams({ propertyId: undefined });
+    setIsAllBuildings(false);
+    setSelectedBuildingFilter('all');
+    if (route.params?.propertyId || route.params?.allBuildings) {
+      navigation.setParams({ propertyId: undefined, allBuildings: undefined });
     }
     try {
       await ScreenOrientation.lockAsync(ScreenOrientation.OrientationLock.PORTRAIT_UP);
     } catch (e) {
       console.warn('[RentReport] Error locking to portrait:', e);
     }
-  }, [navigation, route.params?.propertyId]);
+  }, [navigation, route.params?.propertyId, route.params?.allBuildings]);
 
   // Load properties list
   const loadProperties = async () => {
@@ -657,6 +1335,8 @@ export default function RentReportScreen() {
         if (matched) {
           setSelectedProperty(matched);
         }
+      } else if (route.params?.allBuildings) {
+        setIsAllBuildings(true);
       }
     } catch (err) {
       console.error('[RentReport] Error loading properties:', err);
@@ -665,6 +1345,20 @@ export default function RentReportScreen() {
       setRefreshing(false);
     }
   };
+
+  // Sync navigation params directly when route parameters update
+  useEffect(() => {
+    if (route.params?.allBuildings) {
+      setIsAllBuildings(true);
+      setSelectedProperty(null);
+    } else if (route.params?.propertyId && properties.length > 0) {
+      const matched = properties.find((p) => p.id === route.params.propertyId);
+      if (matched) {
+        setSelectedProperty(matched);
+        setIsAllBuildings(false);
+      }
+    }
+  }, [route.params?.propertyId, route.params?.allBuildings, properties]);
 
   // Load report data for selected property & year
   const loadReport = useCallback(async (propertyId: number, year: number) => {
@@ -679,13 +1373,26 @@ export default function RentReportScreen() {
     }
   }, []);
 
-  // Lock orientation when selectedProperty changes
+  // Load consolidated report data for all buildings
+  const loadConsolidatedReport = useCallback(async (year: number) => {
+    try {
+      setLoadingReport(true);
+      const data = await getAllBuildingsRentReport(year);
+      setConsolidatedReport(data);
+    } catch (err) {
+      console.error('[RentReport] Error loading consolidated report:', err);
+    } finally {
+      setLoadingReport(false);
+    }
+  }, []);
+
+  // Lock orientation when selectedProperty or isAllBuildings changes
   useEffect(() => {
     let active = true;
 
     const syncOrientation = async () => {
       try {
-        if (selectedProperty) {
+        if (selectedProperty || isAllBuildings) {
           // Lock just the Report screen to landscape
           await ScreenOrientation.lockAsync(ScreenOrientation.OrientationLock.LANDSCAPE);
           if (active) {
@@ -712,14 +1419,14 @@ export default function RentReportScreen() {
     return () => {
       active = false;
     };
-  }, [selectedProperty, navigation]);
+  }, [selectedProperty, isAllBuildings, navigation]);
 
   // Keep screen orientation & tab bar consistent with focus/blur
   useFocusEffect(
     useCallback(() => {
       loadProperties();
 
-      if (selectedProperty) {
+      if (selectedProperty || isAllBuildings) {
         ScreenOrientation.lockAsync(ScreenOrientation.OrientationLock.LANDSCAPE).catch(() => { });
         navigation.setOptions({
           tabBarStyle: { display: 'none' },
@@ -738,22 +1445,25 @@ export default function RentReportScreen() {
           tabBarStyle: undefined,
         });
       };
-    }, [selectedProperty, navigation])
+    }, [selectedProperty, isAllBuildings, navigation])
   );
 
-  // Reload report when selectedProperty or selectedYear changes
+  // Reload report when selectedProperty, isAllBuildings, or selectedYear changes
   useEffect(() => {
-    if (selectedProperty) {
+    if (isAllBuildings) {
+      loadConsolidatedReport(selectedYear);
+    } else if (selectedProperty) {
       loadReport(selectedProperty.id, selectedYear);
     } else {
       setReportData(null);
+      setConsolidatedReport(null);
     }
-  }, [selectedProperty, selectedYear, loadReport]);
+  }, [isAllBuildings, selectedProperty, selectedYear, loadReport, loadConsolidatedReport]);
 
   // Handle hardware back button on Android
   useEffect(() => {
     const onBackPress = () => {
-      if (selectedProperty) {
+      if (selectedProperty || isAllBuildings) {
         handleBackToBuildings();
         return true;
       }
@@ -762,14 +1472,16 @@ export default function RentReportScreen() {
 
     const backHandler = BackHandler.addEventListener('hardwareBackPress', onBackPress);
     return () => backHandler.remove();
-  }, [selectedProperty, handleBackToBuildings]);
+  }, [selectedProperty, isAllBuildings, handleBackToBuildings]);
 
   const handleRefresh = () => {
     setRefreshing(true);
     syncAll()
-      .catch(() => {})
+      .catch(() => { })
       .finally(() => {
-        if (selectedProperty) {
+        if (isAllBuildings) {
+          loadConsolidatedReport(selectedYear).then(() => setRefreshing(false));
+        } else if (selectedProperty) {
           loadReport(selectedProperty.id, selectedYear).then(() => setRefreshing(false));
         } else {
           loadProperties();
@@ -813,9 +1525,16 @@ export default function RentReportScreen() {
   };
 
   // -------------------------------------------------------------
-  // VIEW 1: REPORT VIEW (When a building is selected) - LIGHT MODE
+  // VIEW 1: REPORT VIEW (When a building or All Buildings is selected) - LIGHT MODE
   // -------------------------------------------------------------
-  if (selectedProperty) {
+  if (selectedProperty || isAllBuildings) {
+    const isPortfolio = isAllBuildings;
+    const targetBuildings: ConsolidatedBuildingReport[] = isPortfolio
+      ? selectedBuildingFilter === 'all'
+        ? (consolidatedReport?.buildings || [])
+        : (consolidatedReport?.buildings.filter((b) => b.property.id === selectedBuildingFilter) || [])
+      : [];
+
     return (
       <View
         style={[
@@ -840,9 +1559,19 @@ export default function RentReportScreen() {
             <Text style={styles.backButtonText}>Buildings</Text>
           </TouchableOpacity>
 
-          <View style={styles.landscapeBadge}>
-            <MaterialCommunityIcons name="screen-rotation" size={14} color="#15803D" />
-            <Text style={styles.landscapeBadgeText}>Landscape</Text>
+          <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
+            {isPortfolio && (
+              <View style={styles.portfolioBadge}>
+                <MaterialCommunityIcons name="office-building" size={13} color="#701A24" />
+                <Text style={styles.portfolioBadgeText}>
+                  All Buildings ({properties.length})
+                </Text>
+              </View>
+            )}
+            <View style={styles.landscapeBadge}>
+              <MaterialCommunityIcons name="screen-rotation" size={14} color="#15803D" />
+              <Text style={styles.landscapeBadgeText}>Landscape</Text>
+            </View>
           </View>
         </View>
 
@@ -863,8 +1592,14 @@ export default function RentReportScreen() {
             {/* Header section with integrated Year Selector */}
             <View style={styles.cardHeader}>
               <View style={styles.cardHeaderTitles}>
-                <Text style={styles.cardMainTitle}>Rent Report</Text>
-                <Text style={styles.cardSubTitle}>{selectedProperty.building_name}</Text>
+                <Text style={styles.cardMainTitle}>
+                  {isPortfolio ? 'All Buildings Rent Report' : 'Rent Report'}
+                </Text>
+                <Text style={styles.cardSubTitle} numberOfLines={1}>
+                  {isPortfolio
+                    ? `Portfolio Statement (${properties.length} Properties) • ${selectedYear}`
+                    : (selectedProperty?.building_name || 'Property')}
+                </Text>
               </View>
 
               <View style={styles.cardHeaderRight}>
@@ -892,8 +1627,13 @@ export default function RentReportScreen() {
                 {/* PDF quick action button in header */}
                 <TouchableOpacity
                   style={[styles.cardPdfBtn, isExportingPdf && { opacity: 0.7 }]}
-                  onPress={handleDownloadPdf}
-                  disabled={isExportingPdf || !reportData || reportData.rows.length === 0}
+                  onPress={isPortfolio ? handleDownloadAllBuildingsPdf : handleDownloadPdf}
+                  disabled={
+                    isExportingPdf ||
+                    (isPortfolio
+                      ? !consolidatedReport || consolidatedReport.buildings.length === 0
+                      : !reportData || reportData.rows.length === 0)
+                  }
                   hitSlop={{ top: 6, bottom: 6, left: 6, right: 6 }}
                   activeOpacity={0.8}
                 >
@@ -914,116 +1654,556 @@ export default function RentReportScreen() {
               </View>
             </View>
 
+            {/* KPI Metric Strip for Portfolio Mode */}
+            {isPortfolio && consolidatedReport && (
+              <View style={styles.kpiStripRow}>
+                <View style={[styles.kpiPill, { borderColor: '#E2E8F0', backgroundColor: '#F8FAFC' }]}>
+                  <Text style={styles.kpiPillLabel}>PROPERTIES</Text>
+                  <Text style={[styles.kpiPillValue, { color: '#0F172A' }]}>
+                    {consolidatedReport.buildings.length}
+                  </Text>
+                </View>
+                <View style={[styles.kpiPill, { borderColor: '#E2E8F0', backgroundColor: '#F8FAFC' }]}>
+                  <Text style={styles.kpiPillLabel}>TOTAL UNITS</Text>
+                  <Text style={[styles.kpiPillValue, { color: '#0F172A' }]}>
+                    {consolidatedReport.totalUnits}
+                  </Text>
+                </View>
+                <View style={[styles.kpiPill, { borderColor: '#E2E8F0', backgroundColor: '#F8FAFC' }]}>
+                  <Text style={styles.kpiPillLabel}>ACTIVE TENANTS</Text>
+                  <Text style={[styles.kpiPillValue, { color: '#0F172A' }]}>
+                    {consolidatedReport.totalTenants}
+                  </Text>
+                </View>
+                <View style={[styles.kpiPill, { borderColor: '#86EFAC', backgroundColor: '#F0FDF4' }]}>
+                  <Text style={[styles.kpiPillLabel, { color: '#166534' }]}>TOTAL COLLECTED</Text>
+                  <Text style={[styles.kpiPillValue, { color: '#15803D' }]}>
+                    ₹{consolidatedReport.totalPaid.toLocaleString('en-IN')}
+                  </Text>
+                </View>
+                <View style={[styles.kpiPill, { borderColor: '#FECACA', backgroundColor: '#FEF2F2' }]}>
+                  <Text style={[styles.kpiPillLabel, { color: '#991B1B' }]}>PENDING DUES</Text>
+                  <Text style={[styles.kpiPillValue, { color: '#B91C1C' }]}>
+                    ₹{consolidatedReport.totalPending.toLocaleString('en-IN')}
+                  </Text>
+                </View>
+              </View>
+            )}
+
+            {/* Portfolio Building Filter Tabs */}
+            {isPortfolio && properties.length > 1 && (
+              <View style={styles.portfolioFilterStrip}>
+                <ScrollView
+                  horizontal
+                  showsHorizontalScrollIndicator={false}
+                  contentContainerStyle={styles.portfolioTabsContent}
+                >
+                  <TouchableOpacity
+                    style={[
+                      styles.portfolioTab,
+                      selectedBuildingFilter === 'all' && styles.portfolioTabActive,
+                    ]}
+                    onPress={() => setSelectedBuildingFilter('all')}
+                    activeOpacity={0.7}
+                  >
+                    <Text
+                      style={[
+                        styles.portfolioTabText,
+                        selectedBuildingFilter === 'all' && styles.portfolioTabTextActive,
+                      ]}
+                    >
+                      All Buildings ({properties.length})
+                    </Text>
+                  </TouchableOpacity>
+
+                  {properties.map((p) => (
+                    <TouchableOpacity
+                      key={`pill-${p.id}`}
+                      style={[
+                        styles.portfolioTab,
+                        selectedBuildingFilter === p.id && styles.portfolioTabActive,
+                      ]}
+                      onPress={() => setSelectedBuildingFilter(p.id)}
+                      activeOpacity={0.7}
+                    >
+                      <Text
+                        style={[
+                          styles.portfolioTabText,
+                          selectedBuildingFilter === p.id && styles.portfolioTabTextActive,
+                        ]}
+                      >
+                        {p.building_name}
+                      </Text>
+                    </TouchableOpacity>
+                  ))}
+                </ScrollView>
+              </View>
+            )}
+
             {/* Report Table */}
             {loadingReport ? (
               <View style={styles.tableLoadingBox}>
                 <ActivityIndicator size="small" color={Colors.primary} />
-                <Text style={styles.loadingText}>Loading {selectedYear} report...</Text>
-              </View>
-            ) : !reportData || reportData.rows.length === 0 ? (
-              <View style={styles.emptyTableBox}>
-                <MaterialCommunityIcons name="account-group-outline" size={36} color="#94A3B8" />
-                <Text style={styles.emptyTableTitle}>No active tenants found</Text>
-                <Text style={styles.emptyTableSubtitle}>
-                  Add tenants to {selectedProperty.building_name} to view the monthly report.
+                <Text style={styles.loadingText}>
+                  Loading {selectedYear} {isPortfolio ? 'consolidated portfolio' : ''} report...
                 </Text>
               </View>
-            ) : (
-              <View style={styles.tableOuterWrapper}>
-                <View style={styles.tableContainer}>
-                  {/* Left Fixed Columns: Name & Flat */}
-                  <View style={styles.fixedColumnsWrapper}>
-                    {/* Fixed Header */}
-                    <View style={styles.tableHeaderRow}>
-                      <View style={[styles.headerCell, { width: NAME_COL_WIDTH }]}>
-                        <Text style={styles.headerCellText}>NAME</Text>
+            ) : isPortfolio ? (
+              /* ============================================================== */
+              /* PORTFOLIO CONSOLIDATED TABLE (ALL BUILDINGS)                   */
+              /* ============================================================== */
+              !consolidatedReport || consolidatedReport.buildings.length === 0 ? (
+                <View style={styles.emptyTableBox}>
+                  <MaterialCommunityIcons name="office-building-outline" size={36} color="#94A3B8" />
+                  <Text style={styles.emptyTableTitle}>No properties available</Text>
+                  <Text style={styles.emptyTableSubtitle}>
+                    Add properties to view the consolidated rent report.
+                  </Text>
+                </View>
+              ) : (
+                <View style={styles.tableOuterWrapper}>
+                  <View style={styles.tableContainer}>
+                    {/* Left Fixed Columns: Name & Flat */}
+                    <View style={styles.fixedColumnsWrapper}>
+                      {/* Fixed Header */}
+                      <View style={styles.tableHeaderRow}>
+                        <View style={[styles.headerCell, { width: NAME_COL_WIDTH }]}>
+                          <Text style={styles.headerCellText}>NAME</Text>
+                        </View>
+                        <View style={[styles.headerCell, { width: FLAT_COL_WIDTH }]}>
+                          <Text style={styles.headerCellText}>FLAT</Text>
+                        </View>
                       </View>
-                      <View style={[styles.headerCell, { width: FLAT_COL_WIDTH }]}>
-                        <Text style={styles.headerCellText}>FLAT</Text>
-                      </View>
+
+                      {/* Fixed Rows for Each Building */}
+                      {targetBuildings.map((b) => (
+                        <React.Fragment key={`fixed-bldg-${b.property.id}`}>
+                          {/* Building Section Header */}
+                          <View style={styles.bldgHeaderFixedRow}>
+                            <View style={[styles.dataCell, { width: NAME_COL_WIDTH + FLAT_COL_WIDTH }]}>
+                              <Text style={styles.bldgHeaderText} numberOfLines={1}>
+                                🏢 {b.property.building_name}
+                              </Text>
+                            </View>
+                          </View>
+
+                          {/* Tenant Rows or Empty Notice */}
+                          {b.report.rows.length === 0 ? (
+                            <View style={styles.tableDataRow}>
+                              <View style={[styles.dataCell, { width: NAME_COL_WIDTH + FLAT_COL_WIDTH }]}>
+                                <Text style={styles.emptyTenantRowText}>No active tenants</Text>
+                              </View>
+                            </View>
+                          ) : (
+                            b.report.rows.map((row) => (
+                              <View key={`fixed-${b.property.id}-${row.tenant.id}`} style={styles.tableDataRow}>
+                                <View style={[styles.dataCell, { width: NAME_COL_WIDTH }]}>
+                                  <Text style={styles.nameCellText} numberOfLines={1} ellipsizeMode="tail">
+                                    {row.tenant.name}
+                                  </Text>
+                                </View>
+                                <View style={[styles.dataCell, { width: FLAT_COL_WIDTH }]}>
+                                  <Text style={styles.flatCellText} numberOfLines={1} ellipsizeMode="tail">
+                                    {row.displayFlat}
+                                  </Text>
+                                </View>
+                              </View>
+                            ))
+                          )}
+
+                          {/* Building Subtotal Row */}
+                          <View style={styles.bldgSubtotalFixedRow}>
+                            <View style={[styles.dataCell, { width: NAME_COL_WIDTH }]}>
+                              <Text style={styles.bldgSubtotalFixedText} numberOfLines={1}>
+                                Subtotal
+                              </Text>
+                            </View>
+                            <View style={[styles.dataCell, { width: FLAT_COL_WIDTH }]}>
+                              <Text style={styles.subtotalDash}>—</Text>
+                            </View>
+                          </View>
+                        </React.Fragment>
+                      ))}
+
+                      {/* Grand Total Row across all buildings (when showing all) */}
+                      {selectedBuildingFilter === 'all' && (
+                        <View style={styles.grandTotalFixedRow}>
+                          <View style={[styles.dataCell, { width: NAME_COL_WIDTH }]}>
+                            <Text style={styles.grandTotalFixedText} numberOfLines={1}>
+                              PORTFOLIO TOTAL
+                            </Text>
+                          </View>
+                          <View style={[styles.dataCell, { width: FLAT_COL_WIDTH }]}>
+                            <Text style={styles.grandTotalDash}>—</Text>
+                          </View>
+                        </View>
+                      )}
                     </View>
 
-                    {/* Fixed Rows */}
-                    {reportData.rows.map((row) => (
-                      <View key={`fixed-${row.tenant.id}`} style={styles.tableDataRow}>
+                    {/* Right Horizontally Scrollable Columns: Months + Total Paid + Pending */}
+                    <ScrollView
+                      horizontal
+                      showsHorizontalScrollIndicator={true}
+                      nestedScrollEnabled={true}
+                      contentContainerStyle={styles.monthsScrollContent}
+                    >
+                      <View>
+                        {/* Header Row */}
+                        <View style={styles.tableHeaderRow}>
+                          {MONTH_SHORT.map((m) => (
+                            <View
+                              key={`month-hdr-${m}`}
+                              style={[styles.headerCell, styles.monthCell, { width: MONTH_COL_WIDTH }]}
+                            >
+                              <Text style={styles.headerCellText}>{m}</Text>
+                            </View>
+                          ))}
+                          <View style={[styles.headerCell, styles.summaryCell, { width: 80 }]}>
+                            <Text style={styles.headerCellTextRight}>TOTAL PAID</Text>
+                          </View>
+                          <View style={[styles.headerCell, styles.summaryCell, { width: 80 }]}>
+                            <Text style={styles.headerCellTextRight}>PENDING</Text>
+                          </View>
+                        </View>
+
+                        {/* Rows for Each Building */}
+                        {targetBuildings.map((b) => (
+                          <React.Fragment key={`scroll-bldg-${b.property.id}`}>
+                            {/* Building Header Span Row */}
+                            <View style={styles.bldgHeaderScrollRow}>
+                              <Text style={styles.bldgHeaderSpanText}>
+                                {b.property.location || b.property.building_address || `${b.property.units || 1} Units`} • {b.report.rows.length} Active Tenants
+                              </Text>
+                            </View>
+
+                            {/* Tenant Rows */}
+                            {b.report.rows.length === 0 ? (
+                              <View style={styles.tableDataRow}>
+                                <View style={{ width: MONTH_COL_WIDTH * 12 + 160, justifyContent: 'center', paddingHorizontal: 10 }}>
+                                  <Text style={styles.emptyTenantRowText}>—</Text>
+                                </View>
+                              </View>
+                            ) : (
+                              b.report.rows.map((row) => {
+                                let rowPaid = 0;
+                                let rowDue = 0;
+                                const rent = row.tenant.rent_amount || 0;
+
+                                for (let mIdx = 0; mIdx < 12; mIdx++) {
+                                  const mData = row.months[mIdx];
+                                  if (!mData) continue;
+                                  const totalAmount = mData.record?.total_amount ?? mData.record?.amount ?? rent;
+                                  if (mData.status === 'paid') {
+                                    rowPaid += mData.record?.paid_amount ?? totalAmount;
+                                  } else if (mData.status === 'not_paid') {
+                                    rowDue += totalAmount;
+                                  } else if (mData.status === 'partial') {
+                                    const p = mData.record?.paid_amount ?? 0;
+                                    rowPaid += p;
+                                    rowDue += Math.max(0, totalAmount - p);
+                                  }
+                                }
+
+                                return (
+                                  <View key={`months-${b.property.id}-${row.tenant.id}`} style={styles.tableDataRow}>
+                                    {MONTH_SHORT.map((_, mIdx) => {
+                                      const monthData = row.months[mIdx];
+                                      const status = monthData?.status || 'upcoming';
+                                      return (
+                                        <View
+                                          key={`cell-${row.tenant.id}-${mIdx}`}
+                                          style={[styles.dataCell, styles.monthCell, { width: MONTH_COL_WIDTH }]}
+                                        >
+                                          {renderStatusCell(status)}
+                                        </View>
+                                      );
+                                    })}
+                                    <View style={[styles.dataCell, styles.summaryCell, { width: 80 }]}>
+                                      <Text style={styles.rowPaidText}>₹{rowPaid.toLocaleString('en-IN')}</Text>
+                                    </View>
+                                    <View style={[styles.dataCell, styles.summaryCell, { width: 80 }]}>
+                                      <Text style={[styles.rowDueText, rowDue > 0 && styles.rowDueTextAlert]}>
+                                        {rowDue > 0 ? `₹${rowDue.toLocaleString('en-IN')}` : '—'}
+                                      </Text>
+                                    </View>
+                                  </View>
+                                );
+                              })
+                            )}
+
+                            {/* Building Subtotal Row */}
+                            <View style={styles.bldgSubtotalScrollRow}>
+                              {MONTH_SHORT.map((_, mIdx) => {
+                                const colAmt = b.monthlyCollected[mIdx];
+                                return (
+                                  <View
+                                    key={`subtotal-${b.property.id}-${mIdx}`}
+                                    style={[styles.dataCell, styles.monthCell, { width: MONTH_COL_WIDTH }]}
+                                  >
+                                    <Text style={styles.subtotalMonthText}>
+                                      {colAmt > 0 ? `₹${colAmt >= 1000 ? `${Math.round(colAmt / 1000)}k` : colAmt}` : '—'}
+                                    </Text>
+                                  </View>
+                                );
+                              })}
+                              <View style={[styles.dataCell, styles.summaryCell, { width: 80 }]}>
+                                <Text style={styles.subtotalPaidText}>₹{b.totalPaid.toLocaleString('en-IN')}</Text>
+                              </View>
+                              <View style={[styles.dataCell, styles.summaryCell, { width: 80 }]}>
+                                <Text style={[styles.subtotalDueText, b.totalPending > 0 && styles.rowDueTextAlert]}>
+                                  {b.totalPending > 0 ? `₹${b.totalPending.toLocaleString('en-IN')}` : '—'}
+                                </Text>
+                              </View>
+                            </View>
+                          </React.Fragment>
+                        ))}
+
+                        {/* Grand Total Row */}
+                        {selectedBuildingFilter === 'all' && (
+                          <View style={styles.grandTotalScrollRow}>
+                            {MONTH_SHORT.map((_, mIdx) => {
+                              const overallAmt = consolidatedReport.monthlyCollected[mIdx];
+                              return (
+                                <View
+                                  key={`grand-${mIdx}`}
+                                  style={[styles.dataCell, styles.monthCell, { width: MONTH_COL_WIDTH }]}
+                                >
+                                  <Text style={styles.grandTotalMonthText}>
+                                    {overallAmt > 0
+                                      ? `₹${overallAmt >= 1000 ? `${Math.round(overallAmt / 1000)}k` : overallAmt}`
+                                      : '—'}
+                                  </Text>
+                                </View>
+                              );
+                            })}
+                            <View style={[styles.dataCell, styles.summaryCell, { width: 80 }]}>
+                              <Text style={styles.grandTotalPaidText}>
+                                ₹{consolidatedReport.totalPaid.toLocaleString('en-IN')}
+                              </Text>
+                            </View>
+                            <View style={[styles.dataCell, styles.summaryCell, { width: 80 }]}>
+                              <Text
+                                style={[
+                                  styles.grandTotalDueText,
+                                  consolidatedReport.totalPending > 0 && styles.rowDueTextAlert,
+                                ]}
+                              >
+                                {consolidatedReport.totalPending > 0
+                                  ? `₹${consolidatedReport.totalPending.toLocaleString('en-IN')}`
+                                  : '—'}
+                              </Text>
+                            </View>
+                          </View>
+                        )}
+                      </View>
+                    </ScrollView>
+                  </View>
+
+                  {/* Table Footer Legend */}
+                  <View style={styles.legendContainer}>
+                    <View style={styles.legendItem}>
+                      <MaterialCommunityIcons name="check" size={16} color="#16A34A" />
+                      <Text style={styles.legendText}>Paid</Text>
+                    </View>
+
+                    <View style={styles.legendItem}>
+                      <MaterialCommunityIcons name="close" size={14} color="#DC2626" />
+                      <Text style={styles.legendText}>Not paid</Text>
+                    </View>
+
+                    <View style={styles.legendItem}>
+                      <Text style={styles.upcomingLegendSymbol}>—</Text>
+                      <Text style={styles.legendText}>Upcoming</Text>
+                    </View>
+
+                    <View style={styles.legendItem}>
+                      <Text style={styles.partialLegendSymbol}>Part</Text>
+                      <Text style={styles.legendText}>Partial</Text>
+                    </View>
+                  </View>
+                </View>
+              )
+            ) : (
+              /* ============================================================== */
+              /* SINGLE BUILDING TABLE                                          */
+              /* ============================================================== */
+              !reportData || reportData.rows.length === 0 ? (
+                <View style={styles.emptyTableBox}>
+                  <MaterialCommunityIcons name="account-group-outline" size={36} color="#94A3B8" />
+                  <Text style={styles.emptyTableTitle}>No active tenants found</Text>
+                  <Text style={styles.emptyTableSubtitle}>
+                    Add tenants to {selectedProperty?.building_name} to view the monthly report.
+                  </Text>
+                </View>
+              ) : (
+                <View style={styles.tableOuterWrapper}>
+                  <View style={styles.tableContainer}>
+                    {/* Left Fixed Columns: Name & Flat */}
+                    <View style={styles.fixedColumnsWrapper}>
+                      {/* Fixed Header */}
+                      <View style={styles.tableHeaderRow}>
+                        <View style={[styles.headerCell, { width: NAME_COL_WIDTH }]}>
+                          <Text style={styles.headerCellText}>NAME</Text>
+                        </View>
+                        <View style={[styles.headerCell, { width: FLAT_COL_WIDTH }]}>
+                          <Text style={styles.headerCellText}>FLAT</Text>
+                        </View>
+                      </View>
+
+                      {/* Fixed Rows */}
+                      {reportData.rows.map((row) => (
+                        <View key={`fixed-${row.tenant.id}`} style={styles.tableDataRow}>
+                          <View style={[styles.dataCell, { width: NAME_COL_WIDTH }]}>
+                            <Text style={styles.nameCellText} numberOfLines={1} ellipsizeMode="tail">
+                              {row.tenant.name}
+                            </Text>
+                          </View>
+                          <View style={[styles.dataCell, { width: FLAT_COL_WIDTH }]}>
+                            <Text style={styles.flatCellText} numberOfLines={1} ellipsizeMode="tail">
+                              {row.displayFlat}
+                            </Text>
+                          </View>
+                        </View>
+                      ))}
+
+                      {/* Subtotal Fixed Row */}
+                      <View style={styles.bldgSubtotalFixedRow}>
                         <View style={[styles.dataCell, { width: NAME_COL_WIDTH }]}>
-                          <Text style={styles.nameCellText} numberOfLines={1} ellipsizeMode="tail">
-                            {row.tenant.name}
+                          <Text style={styles.bldgSubtotalFixedText} numberOfLines={1}>
+                            Building Total
                           </Text>
                         </View>
                         <View style={[styles.dataCell, { width: FLAT_COL_WIDTH }]}>
-                          <Text style={styles.flatCellText} numberOfLines={1} ellipsizeMode="tail">
-                            {row.displayFlat}
-                          </Text>
+                          <Text style={styles.subtotalDash}>—</Text>
                         </View>
                       </View>
-                    ))}
-                  </View>
+                    </View>
 
-                  {/* Right Horizontally Scrollable Month Columns */}
-                  <ScrollView
-                    horizontal
-                    showsHorizontalScrollIndicator={true}
-                    nestedScrollEnabled={true}
-                    contentContainerStyle={styles.monthsScrollContent}
-                  >
-                    <View>
-                      {/* Months Header Row */}
-                      <View style={styles.tableHeaderRow}>
-                        {MONTH_SHORT.map((m) => (
-                          <View
-                            key={`month-hdr-${m}`}
-                            style={[styles.headerCell, styles.monthCell, { width: MONTH_COL_WIDTH }]}
-                          >
-                            <Text style={styles.headerCellText}>{m}</Text>
+                    {/* Right Horizontally Scrollable Month Columns */}
+                    <ScrollView
+                      horizontal
+                      showsHorizontalScrollIndicator={true}
+                      nestedScrollEnabled={true}
+                      contentContainerStyle={styles.monthsScrollContent}
+                    >
+                      <View>
+                        {/* Months Header Row */}
+                        <View style={styles.tableHeaderRow}>
+                          {MONTH_SHORT.map((m) => (
+                            <View
+                              key={`month-hdr-${m}`}
+                              style={[styles.headerCell, styles.monthCell, { width: MONTH_COL_WIDTH }]}
+                            >
+                              <Text style={styles.headerCellText}>{m}</Text>
+                            </View>
+                          ))}
+                          <View style={[styles.headerCell, styles.summaryCell, { width: 80 }]}>
+                            <Text style={styles.headerCellTextRight}>TOTAL PAID</Text>
                           </View>
-                        ))}
-                      </View>
+                          <View style={[styles.headerCell, styles.summaryCell, { width: 80 }]}>
+                            <Text style={styles.headerCellTextRight}>PENDING</Text>
+                          </View>
+                        </View>
 
-                      {/* Months Data Rows */}
-                      {reportData.rows.map((row) => (
-                        <View key={`months-${row.tenant.id}`} style={styles.tableDataRow}>
+                        {/* Months Data Rows */}
+                        {reportData.rows.map((row) => {
+                          let rowPaid = 0;
+                          let rowDue = 0;
+                          const rent = row.tenant.rent_amount || 0;
+
+                          for (let mIdx = 0; mIdx < 12; mIdx++) {
+                            const mData = row.months[mIdx];
+                            if (!mData) continue;
+                            const totalAmount = mData.record?.total_amount ?? mData.record?.amount ?? rent;
+                            if (mData.status === 'paid') {
+                              rowPaid += mData.record?.paid_amount ?? totalAmount;
+                            } else if (mData.status === 'not_paid') {
+                              rowDue += totalAmount;
+                            } else if (mData.status === 'partial') {
+                              const p = mData.record?.paid_amount ?? 0;
+                              rowPaid += p;
+                              rowDue += Math.max(0, totalAmount - p);
+                            }
+                          }
+
+                          return (
+                            <View key={`months-${row.tenant.id}`} style={styles.tableDataRow}>
+                              {MONTH_SHORT.map((_, mIdx) => {
+                                const monthData = row.months[mIdx];
+                                const status = monthData?.status || 'upcoming';
+                                return (
+                                  <View
+                                    key={`cell-${row.tenant.id}-${mIdx}`}
+                                    style={[styles.dataCell, styles.monthCell, { width: MONTH_COL_WIDTH }]}
+                                  >
+                                    {renderStatusCell(status)}
+                                  </View>
+                                );
+                              })}
+                              <View style={[styles.dataCell, styles.summaryCell, { width: 80 }]}>
+                                <Text style={styles.rowPaidText}>₹{rowPaid.toLocaleString('en-IN')}</Text>
+                              </View>
+                              <View style={[styles.dataCell, styles.summaryCell, { width: 80 }]}>
+                                <Text style={[styles.rowDueText, rowDue > 0 && styles.rowDueTextAlert]}>
+                                  {rowDue > 0 ? `₹${rowDue.toLocaleString('en-IN')}` : '—'}
+                                </Text>
+                              </View>
+                            </View>
+                          );
+                        })}
+
+                        {/* Building Subtotal Row */}
+                        <View style={styles.bldgSubtotalScrollRow}>
                           {MONTH_SHORT.map((_, mIdx) => {
-                            const monthData = row.months[mIdx];
-                            const status = monthData?.status || 'upcoming';
+                            const colAmt = viewerTotals.collected[mIdx];
                             return (
                               <View
-                                key={`cell-${row.tenant.id}-${mIdx}`}
+                                key={`col-subtotal-${mIdx}`}
                                 style={[styles.dataCell, styles.monthCell, { width: MONTH_COL_WIDTH }]}
                               >
-                                {renderStatusCell(status)}
+                                <Text style={styles.subtotalMonthText}>
+                                  {colAmt > 0 ? `₹${colAmt >= 1000 ? `${Math.round(colAmt / 1000)}k` : colAmt}` : '—'}
+                                </Text>
                               </View>
                             );
                           })}
+                          <View style={[styles.dataCell, styles.summaryCell, { width: 80 }]}>
+                            <Text style={styles.subtotalPaidText}>₹{viewerTotals.totalPaid.toLocaleString('en-IN')}</Text>
+                          </View>
+                          <View style={[styles.dataCell, styles.summaryCell, { width: 80 }]}>
+                            <Text style={[styles.subtotalDueText, viewerTotals.totalDue > 0 && styles.rowDueTextAlert]}>
+                              {viewerTotals.totalDue > 0 ? `₹${viewerTotals.totalDue.toLocaleString('en-IN')}` : '—'}
+                            </Text>
+                          </View>
                         </View>
-                      ))}
+                      </View>
+                    </ScrollView>
+                  </View>
+
+                  {/* Table Footer Legend */}
+                  <View style={styles.legendContainer}>
+                    <View style={styles.legendItem}>
+                      <MaterialCommunityIcons name="check" size={16} color="#16A34A" />
+                      <Text style={styles.legendText}>Paid</Text>
                     </View>
-                  </ScrollView>
-                </View>
 
-                {/* Table Footer Legend */}
-                <View style={styles.legendContainer}>
-                  <View style={styles.legendItem}>
-                    <MaterialCommunityIcons name="check" size={16} color="#16A34A" />
-                    <Text style={styles.legendText}>Paid</Text>
-                  </View>
+                    <View style={styles.legendItem}>
+                      <MaterialCommunityIcons name="close" size={14} color="#DC2626" />
+                      <Text style={styles.legendText}>Not paid</Text>
+                    </View>
 
-                  <View style={styles.legendItem}>
-                    <MaterialCommunityIcons name="close" size={14} color="#DC2626" />
-                    <Text style={styles.legendText}>Not paid</Text>
-                  </View>
+                    <View style={styles.legendItem}>
+                      <Text style={styles.upcomingLegendSymbol}>—</Text>
+                      <Text style={styles.legendText}>Upcoming</Text>
+                    </View>
 
-                  <View style={styles.legendItem}>
-                    <Text style={styles.upcomingLegendSymbol}>—</Text>
-                    <Text style={styles.legendText}>Upcoming</Text>
-                  </View>
-
-                  <View style={styles.legendItem}>
-                    <Text style={styles.partialLegendSymbol}>Part</Text>
-                    <Text style={styles.legendText}>Partial</Text>
+                    <View style={styles.legendItem}>
+                      <Text style={styles.partialLegendSymbol}>Part</Text>
+                      <Text style={styles.legendText}>Partial</Text>
+                    </View>
                   </View>
                 </View>
-              </View>
+              )
             )}
           </View>
         </ScrollView>
@@ -1049,10 +2229,15 @@ export default function RentReportScreen() {
 
               <View style={styles.viewerTitleBox}>
                 <Text style={styles.viewerTitle} numberOfLines={1}>
-                  {downloadedFileName || `Rent-Report_${selectedProperty.building_name}_${selectedYear}.pdf`}
+                  {downloadedFileName ||
+                    (isPortfolio
+                      ? `Rent-Report_All_Buildings_${selectedYear}.pdf`
+                      : `Rent-Report_${selectedProperty?.building_name || 'Property'}_${selectedYear}.pdf`)}
                 </Text>
                 <Text style={styles.viewerSubtitle}>
-                  A4 Landscape Document • Saved to Documents
+                  {isPortfolio
+                    ? `A4 Landscape Document • Consolidated Portfolio (${properties.length} Properties)`
+                    : 'A4 Landscape Document • Saved to Documents'}
                 </Text>
               </View>
 
@@ -1120,160 +2305,389 @@ export default function RentReportScreen() {
                     },
                   ]}
                 >
-                  {/* Sheet Header */}
-                  <View style={styles.sheetHeader}>
-                    <View style={styles.sheetHeaderLeft}>
-                      <Text style={styles.sheetBrandTitle}>SLS PROPERTIES</Text>
-                      <Text style={styles.sheetDocTitle}>
-                        RENT REPORT — {(selectedProperty.building_name || '').toUpperCase()} ({selectedYear})
-                      </Text>
-                      <Text style={styles.sheetDocAddress}>
-                        {selectedProperty.building_address || selectedProperty.location || 'Property Management Statement'}
-                      </Text>
-                    </View>
-                    <View style={styles.sheetHeaderRight}>
-                      <View style={styles.sheetBadge}>
-                        <Text style={styles.sheetBadgeText}>ANNUAL STATEMENT</Text>
+                  {isPortfolio && consolidatedReport ? (
+                    /* ============================================================== */
+                    /* PORTFOLIO CONSOLIDATED SHEET PREVIEW                           */
+                    /* ============================================================== */
+                    <View>
+                      {/* Sheet Header */}
+                      <View style={styles.sheetHeader}>
+                        <View style={styles.sheetHeaderLeft}>
+                          <Text style={styles.sheetBrandTitle}>SLS PROPERTIES</Text>
+                          <Text style={styles.sheetDocTitle}>
+                            ALL BUILDINGS CONSOLIDATED RENT REPORT ({selectedYear})
+                          </Text>
+                          <Text style={styles.sheetDocAddress}>
+                            Complete Multi-Property Portfolio Statement • {consolidatedReport.buildings.length} Properties
+                          </Text>
+                        </View>
+                        <View style={styles.sheetHeaderRight}>
+                          <View style={styles.sheetBadge}>
+                            <Text style={styles.sheetBadgeText}>PORTFOLIO STATEMENT</Text>
+                          </View>
+                          <Text style={styles.sheetDateText}>
+                            Generated: {new Date().toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' })}
+                          </Text>
+                        </View>
                       </View>
-                      <Text style={styles.sheetDateText}>
-                        Generated: {new Date().toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' })}
-                      </Text>
-                    </View>
-                  </View>
 
-                  {/* Summary Metric Strip */}
-                  <View style={styles.sheetKpiStrip}>
-                    <View style={[styles.sheetKpiCard, { borderColor: '#86EFAC', backgroundColor: '#F0FDF4' }]}>
-                      <Text style={[styles.sheetKpiLabel, { color: '#166534' }]}>TOTAL COLLECTED</Text>
-                      <Text style={[styles.sheetKpiValue, { color: '#15803D' }]}>
-                        ₹{viewerTotals.totalPaid.toLocaleString('en-IN')}
-                      </Text>
-                    </View>
-
-                    <View style={[styles.sheetKpiCard, { borderColor: '#FECACA', backgroundColor: '#FEF2F2' }]}>
-                      <Text style={[styles.sheetKpiLabel, { color: '#991B1B' }]}>TOTAL PENDING</Text>
-                      <Text style={[styles.sheetKpiValue, { color: '#B91C1C' }]}>
-                        ₹{viewerTotals.totalDue.toLocaleString('en-IN')}
-                      </Text>
-                    </View>
-
-                    <View style={[styles.sheetKpiCard, { borderColor: '#E2E8F0', backgroundColor: '#F8FAFC' }]}>
-                      <Text style={[styles.sheetKpiLabel, { color: '#475569' }]}>TOTAL TENANTS</Text>
-                      <Text style={[styles.sheetKpiValue, { color: '#0F172A' }]}>
-                        {reportData?.rows.length || 0}
-                      </Text>
-                    </View>
-                  </View>
-
-                  {/* Document Table */}
-                  <View style={styles.sheetTable}>
-                    {/* Table Header */}
-                    <View style={styles.sheetTableHeaderRow}>
-                      <Text style={[styles.sheetTh, { width: 60 }]}>Flat</Text>
-                      <Text style={[styles.sheetTh, { width: 120 }]}>Tenant</Text>
-                      {MONTH_SHORT.map((m) => (
-                        <Text key={m} style={[styles.sheetTh, styles.sheetThMonth, { width: 52 }]}>
-                          {m}
-                        </Text>
-                      ))}
-                      <Text style={[styles.sheetTh, styles.sheetThNumber, { width: 90 }]}>Total Paid</Text>
-                      <Text style={[styles.sheetTh, styles.sheetThNumber, { width: 90 }]}>Pending</Text>
-                    </View>
-
-                    {/* Table Rows */}
-                    {reportData?.rows.map((row, idx) => {
-                      let rowPaid = 0;
-                      let rowDue = 0;
-                      const rent = row.tenant.rent_amount || 0;
-
-                      for (let mIdx = 0; mIdx < 12; mIdx++) {
-                        const m = row.months[mIdx];
-                        if (!m) continue;
-                        const totalAmount = m.record?.total_amount ?? m.record?.amount ?? rent;
-                        if (m.status === 'paid') {
-                          rowPaid += (m.record?.paid_amount ?? totalAmount);
-                        } else if (m.status === 'not_paid') {
-                          rowDue += totalAmount;
-                        } else if (m.status === 'partial') {
-                          const p = m.record?.paid_amount ?? 0;
-                          rowPaid += p;
-                          rowDue += Math.max(0, totalAmount - p);
-                        }
-                      }
-
-                      return (
-                        <View
-                          key={row.tenant.id}
-                          style={[
-                            styles.sheetTableRow,
-                            idx % 2 === 1 && styles.sheetTableRowAlt,
-                          ]}
-                        >
-                          <Text style={[styles.sheetTd, { width: 60, fontWeight: '700' }]}>
-                            {row.tenant.flat_number || '—'}
+                      {/* Summary Metric Strip */}
+                      <View style={styles.sheetKpiStrip}>
+                        <View style={[styles.sheetKpiCard, { borderColor: '#86EFAC', backgroundColor: '#F0FDF4' }]}>
+                          <Text style={[styles.sheetKpiLabel, { color: '#166534' }]}>PORTFOLIO COLLECTED</Text>
+                          <Text style={[styles.sheetKpiValue, { color: '#15803D' }]}>
+                            ₹{consolidatedReport.totalPaid.toLocaleString('en-IN')}
                           </Text>
-                          <Text style={[styles.sheetTd, { width: 120, fontWeight: '600' }]} numberOfLines={1}>
-                            {row.tenant.name}
+                        </View>
+
+                        <View style={[styles.sheetKpiCard, { borderColor: '#FECACA', backgroundColor: '#FEF2F2' }]}>
+                          <Text style={[styles.sheetKpiLabel, { color: '#991B1B' }]}>PORTFOLIO PENDING</Text>
+                          <Text style={[styles.sheetKpiValue, { color: '#B91C1C' }]}>
+                            ₹{consolidatedReport.totalPending.toLocaleString('en-IN')}
                           </Text>
-                          {MONTH_SHORT.map((_, mIdx) => {
-                            const mData = row.months[mIdx];
-                            const status = mData?.status || 'upcoming';
-                            const payDate = getMonthPaymentDate(mData);
-                            const pAmt = mData?.record?.paid_amount ?? 0;
-                            return (
-                              <View key={mIdx} style={[styles.sheetTd, styles.sheetTdMonth, { width: 52 }]}>
-                                {status === 'paid' ? (
-                                  <View style={styles.sheetChipPaid}>
-                                    <Text style={styles.sheetChipPaidText}>✓ Paid</Text>
-                                    {payDate ? <Text style={styles.sheetChipPaidDate}>{payDate}</Text> : null}
-                                  </View>
-                                ) : status === 'not_paid' ? (
-                                  <View style={styles.sheetChipDue}>
-                                    <Text style={styles.sheetChipDueText}>✕ Due</Text>
-                                  </View>
-                                ) : status === 'partial' ? (
-                                  <View style={styles.sheetChipPart}>
-                                    <Text style={styles.sheetChipPartText}>
-                                      {pAmt > 0 ? `₹${pAmt.toLocaleString('en-IN')}` : 'Part'}
-                                    </Text>
-                                    {payDate ? <Text style={styles.sheetChipPartDate}>{payDate}</Text> : null}
-                                  </View>
-                                ) : (
-                                  <Text style={styles.sheetChipUpcomingText}>—</Text>
-                                )}
+                        </View>
+
+                        <View style={[styles.sheetKpiCard, { borderColor: '#E2E8F0', backgroundColor: '#F8FAFC' }]}>
+                          <Text style={[styles.sheetKpiLabel, { color: '#475569' }]}>TOTAL PROPERTIES</Text>
+                          <Text style={[styles.sheetKpiValue, { color: '#0F172A' }]}>
+                            {consolidatedReport.buildings.length}
+                          </Text>
+                        </View>
+
+                        <View style={[styles.sheetKpiCard, { borderColor: '#E2E8F0', backgroundColor: '#F8FAFC' }]}>
+                          <Text style={[styles.sheetKpiLabel, { color: '#475569' }]}>TOTAL UNITS</Text>
+                          <Text style={[styles.sheetKpiValue, { color: '#0F172A' }]}>
+                            {consolidatedReport.totalUnits}
+                          </Text>
+                        </View>
+
+                        <View style={[styles.sheetKpiCard, { borderColor: '#E2E8F0', backgroundColor: '#F8FAFC' }]}>
+                          <Text style={[styles.sheetKpiLabel, { color: '#475569' }]}>ACTIVE TENANTS</Text>
+                          <Text style={[styles.sheetKpiValue, { color: '#0F172A' }]}>
+                            {consolidatedReport.totalTenants}
+                          </Text>
+                        </View>
+                      </View>
+
+                      {/* Buildings Breakdown */}
+                      {consolidatedReport.buildings.map((b, bIdx) => (
+                        <View key={`sheet-bldg-${b.property.id}`} style={styles.sheetBldgSection}>
+                          {/* Section Header */}
+                          <View style={styles.sheetBldgHeader}>
+                            <Text style={styles.sheetBldgTitle}>
+                              #{bIdx + 1} {b.property.building_name}
+                              {b.property.location ? ` • ${b.property.location}` : ''}
+                            </Text>
+                            <Text style={styles.sheetBldgSummary}>
+                              Collected: ₹{b.totalPaid.toLocaleString('en-IN')} | Pending: ₹{b.totalPending.toLocaleString('en-IN')}
+                            </Text>
+                          </View>
+
+                          {/* Table */}
+                          <View style={styles.sheetTable}>
+                            <View style={styles.sheetTableHeaderRow}>
+                              <Text style={[styles.sheetTh, { width: 60 }]}>Flat</Text>
+                              <Text style={[styles.sheetTh, { width: 120 }]}>Tenant</Text>
+                              {MONTH_SHORT.map((m) => (
+                                <Text key={m} style={[styles.sheetTh, styles.sheetThMonth, { width: 52 }]}>
+                                  {m}
+                                </Text>
+                              ))}
+                              <Text style={[styles.sheetTh, styles.sheetThNumber, { width: 90 }]}>Total Paid</Text>
+                              <Text style={[styles.sheetTh, styles.sheetThNumber, { width: 90 }]}>Pending</Text>
+                            </View>
+
+                            {b.report.rows.length === 0 ? (
+                              <View style={[styles.sheetTableRow, { paddingVertical: 10, justifyContent: 'center' }]}>
+                                <Text style={{ color: '#94A3B8', fontSize: 11, fontStyle: 'italic' }}>
+                                  No active tenants in {b.property.building_name}
+                                </Text>
                               </View>
-                            );
-                          })}
-                          <Text style={[styles.sheetTd, styles.sheetTdNumber, { width: 90, color: '#16A34A', fontWeight: '700' }]}>
-                            ₹{rowPaid.toLocaleString('en-IN')}
-                          </Text>
-                          <Text style={[styles.sheetTd, styles.sheetTdNumber, { width: 90, color: rowDue > 0 ? '#DC2626' : '#64748B', fontWeight: '700' }]}>
-                            {rowDue > 0 ? `₹${rowDue.toLocaleString('en-IN')}` : '—'}
-                          </Text>
-                        </View>
-                      );
-                    })}
+                            ) : (
+                              b.report.rows.map((row, idx) => {
+                                let rowPaid = 0;
+                                let rowDue = 0;
+                                const rent = row.tenant.rent_amount || 0;
 
-                    {/* Table Footer Totals */}
-                    <View style={styles.sheetTableFooterRow}>
-                      <Text style={[styles.sheetTf, { width: 180, fontWeight: '800' }]}>MONTHLY TOTALS</Text>
-                      {MONTH_SHORT.map((_, mIdx) => (
-                        <View key={mIdx} style={[styles.sheetTf, styles.sheetTdMonth, { width: 52 }]}>
-                          <Text style={styles.sheetTfMonthText}>
-                            {viewerTotals.collected[mIdx] > 0
-                              ? `₹${viewerTotals.collected[mIdx] >= 1000 ? `${Math.round(viewerTotals.collected[mIdx] / 1000)}k` : viewerTotals.collected[mIdx]}`
-                              : '—'}
-                          </Text>
+                                for (let mIdx = 0; mIdx < 12; mIdx++) {
+                                  const m = row.months[mIdx];
+                                  if (!m) continue;
+                                  const totalAmount = m.record?.total_amount ?? m.record?.amount ?? rent;
+                                  if (m.status === 'paid') {
+                                    rowPaid += m.record?.paid_amount ?? totalAmount;
+                                  } else if (m.status === 'not_paid') {
+                                    rowDue += totalAmount;
+                                  } else if (m.status === 'partial') {
+                                    const p = m.record?.paid_amount ?? 0;
+                                    rowPaid += p;
+                                    rowDue += Math.max(0, totalAmount - p);
+                                  }
+                                }
+
+                                return (
+                                  <View
+                                    key={`sheet-row-${row.tenant.id}`}
+                                    style={[
+                                      styles.sheetTableRow,
+                                      idx % 2 === 1 && styles.sheetTableRowAlt,
+                                    ]}
+                                  >
+                                    <Text style={[styles.sheetTd, { width: 60, fontWeight: '700' }]}>
+                                      {row.tenant.flat_number || '—'}
+                                    </Text>
+                                    <Text style={[styles.sheetTd, { width: 120, fontWeight: '600' }]} numberOfLines={1}>
+                                      {row.tenant.name}
+                                    </Text>
+                                    {MONTH_SHORT.map((_, mIdx) => {
+                                      const mData = row.months[mIdx];
+                                      const status = mData?.status || 'upcoming';
+                                      const payDate = getMonthPaymentDate(mData);
+                                      const pAmt = mData?.record?.paid_amount ?? 0;
+                                      return (
+                                        <View key={mIdx} style={[styles.sheetTd, styles.sheetTdMonth, { width: 52 }]}>
+                                          {status === 'paid' ? (
+                                            <View style={styles.sheetChipPaid}>
+                                              <Text style={styles.sheetChipPaidText}>✓ Paid</Text>
+                                              {payDate ? <Text style={styles.sheetChipPaidDate}>{payDate}</Text> : null}
+                                            </View>
+                                          ) : status === 'not_paid' ? (
+                                            <View style={styles.sheetChipDue}>
+                                              <Text style={styles.sheetChipDueText}>✕ Due</Text>
+                                            </View>
+                                          ) : status === 'partial' ? (
+                                            <View style={styles.sheetChipPart}>
+                                              <Text style={styles.sheetChipPartText}>
+                                                {pAmt > 0 ? `₹${pAmt.toLocaleString('en-IN')}` : 'Part'}
+                                              </Text>
+                                              {payDate ? <Text style={styles.sheetChipPartDate}>{payDate}</Text> : null}
+                                            </View>
+                                          ) : (
+                                            <Text style={styles.sheetChipUpcomingText}>—</Text>
+                                          )}
+                                        </View>
+                                      );
+                                    })}
+                                    <Text style={[styles.sheetTd, styles.sheetTdNumber, { width: 90, color: '#16A34A', fontWeight: '700' }]}>
+                                      ₹{rowPaid.toLocaleString('en-IN')}
+                                    </Text>
+                                    <Text style={[styles.sheetTd, styles.sheetTdNumber, { width: 90, color: rowDue > 0 ? '#DC2626' : '#64748B', fontWeight: '700' }]}>
+                                      {rowDue > 0 ? `₹${rowDue.toLocaleString('en-IN')}` : '—'}
+                                    </Text>
+                                  </View>
+                                );
+                              })
+                            )}
+
+                            {/* Subtotal Row */}
+                            <View style={styles.sheetTableFooterRow}>
+                              <Text style={[styles.sheetTf, { width: 180, fontWeight: '800' }]}>
+                                {b.property.building_name} Total
+                              </Text>
+                              {MONTH_SHORT.map((_, mIdx) => (
+                                <View key={mIdx} style={[styles.sheetTf, styles.sheetTdMonth, { width: 52 }]}>
+                                  <Text style={styles.sheetTfMonthText}>
+                                    {b.monthlyCollected[mIdx] > 0
+                                      ? `₹${b.monthlyCollected[mIdx] >= 1000 ? `${Math.round(b.monthlyCollected[mIdx] / 1000)}k` : b.monthlyCollected[mIdx]}`
+                                      : '—'}
+                                  </Text>
+                                </View>
+                              ))}
+                              <Text style={[styles.sheetTf, styles.sheetTdNumber, { width: 90, color: '#15803D', fontWeight: '800' }]}>
+                                ₹{b.totalPaid.toLocaleString('en-IN')}
+                              </Text>
+                              <Text style={[styles.sheetTf, styles.sheetTdNumber, { width: 90, color: '#B91C1C', fontWeight: '800' }]}>
+                                ₹{b.totalPending.toLocaleString('en-IN')}
+                              </Text>
+                            </View>
+                          </View>
                         </View>
                       ))}
-                      <Text style={[styles.sheetTf, styles.sheetTdNumber, { width: 90, color: '#15803D', fontWeight: '800' }]}>
-                        ₹{viewerTotals.totalPaid.toLocaleString('en-IN')}
-                      </Text>
-                      <Text style={[styles.sheetTf, styles.sheetTdNumber, { width: 90, color: '#B91C1C', fontWeight: '800' }]}>
-                        ₹{viewerTotals.totalDue.toLocaleString('en-IN')}
-                      </Text>
+
+                      {/* Grand Total Footer Row */}
+                      <View style={[styles.sheetTable, { marginTop: 12 }]}>
+                        <View style={[styles.sheetTableFooterRow, { backgroundColor: '#FDF0F2', borderTopColor: '#701A24' }]}>
+                          <Text style={[styles.sheetTf, { width: 180, fontWeight: '900', color: '#701A24' }]}>
+                            PORTFOLIO GRAND TOTAL
+                          </Text>
+                          {MONTH_SHORT.map((_, mIdx) => (
+                            <View key={mIdx} style={[styles.sheetTf, styles.sheetTdMonth, { width: 52 }]}>
+                              <Text style={[styles.sheetTfMonthText, { color: '#701A24', fontWeight: '800' }]}>
+                                {consolidatedReport.monthlyCollected[mIdx] > 0
+                                  ? `₹${consolidatedReport.monthlyCollected[mIdx] >= 1000 ? `${Math.round(consolidatedReport.monthlyCollected[mIdx] / 1000)}k` : consolidatedReport.monthlyCollected[mIdx]}`
+                                  : '—'}
+                              </Text>
+                            </View>
+                          ))}
+                          <Text style={[styles.sheetTf, styles.sheetTdNumber, { width: 90, color: '#15803D', fontWeight: '900' }]}>
+                            ₹{consolidatedReport.totalPaid.toLocaleString('en-IN')}
+                          </Text>
+                          <Text style={[styles.sheetTf, styles.sheetTdNumber, { width: 90, color: '#B91C1C', fontWeight: '900' }]}>
+                            ₹{consolidatedReport.totalPending.toLocaleString('en-IN')}
+                          </Text>
+                        </View>
+                      </View>
                     </View>
-                  </View>
+                  ) : selectedProperty && reportData ? (
+                    /* ============================================================== */
+                    /* SINGLE PROPERTY SHEET PREVIEW                                  */
+                    /* ============================================================== */
+                    <View>
+                      {/* Sheet Header */}
+                      <View style={styles.sheetHeader}>
+                        <View style={styles.sheetHeaderLeft}>
+                          <Text style={styles.sheetBrandTitle}>SLS PROPERTIES</Text>
+                          <Text style={styles.sheetDocTitle}>
+                            RENT REPORT — {(selectedProperty.building_name || '').toUpperCase()} ({selectedYear})
+                          </Text>
+                          <Text style={styles.sheetDocAddress}>
+                            {selectedProperty.building_address || selectedProperty.location || 'Property Management Statement'}
+                          </Text>
+                        </View>
+                        <View style={styles.sheetHeaderRight}>
+                          <View style={styles.sheetBadge}>
+                            <Text style={styles.sheetBadgeText}>ANNUAL STATEMENT</Text>
+                          </View>
+                          <Text style={styles.sheetDateText}>
+                            Generated: {new Date().toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' })}
+                          </Text>
+                        </View>
+                      </View>
+
+                      {/* Summary Metric Strip */}
+                      <View style={styles.sheetKpiStrip}>
+                        <View style={[styles.sheetKpiCard, { borderColor: '#86EFAC', backgroundColor: '#F0FDF4' }]}>
+                          <Text style={[styles.sheetKpiLabel, { color: '#166534' }]}>TOTAL COLLECTED</Text>
+                          <Text style={[styles.sheetKpiValue, { color: '#15803D' }]}>
+                            ₹{viewerTotals.totalPaid.toLocaleString('en-IN')}
+                          </Text>
+                        </View>
+
+                        <View style={[styles.sheetKpiCard, { borderColor: '#FECACA', backgroundColor: '#FEF2F2' }]}>
+                          <Text style={[styles.sheetKpiLabel, { color: '#991B1B' }]}>TOTAL PENDING</Text>
+                          <Text style={[styles.sheetKpiValue, { color: '#B91C1C' }]}>
+                            ₹{viewerTotals.totalDue.toLocaleString('en-IN')}
+                          </Text>
+                        </View>
+
+                        <View style={[styles.sheetKpiCard, { borderColor: '#E2E8F0', backgroundColor: '#F8FAFC' }]}>
+                          <Text style={[styles.sheetKpiLabel, { color: '#475569' }]}>TOTAL TENANTS</Text>
+                          <Text style={[styles.sheetKpiValue, { color: '#0F172A' }]}>
+                            {reportData?.rows.length || 0}
+                          </Text>
+                        </View>
+                      </View>
+
+                      {/* Document Table */}
+                      <View style={styles.sheetTable}>
+                        {/* Table Header */}
+                        <View style={styles.sheetTableHeaderRow}>
+                          <Text style={[styles.sheetTh, { width: 60 }]}>Flat</Text>
+                          <Text style={[styles.sheetTh, { width: 120 }]}>Tenant</Text>
+                          {MONTH_SHORT.map((m) => (
+                            <Text key={m} style={[styles.sheetTh, styles.sheetThMonth, { width: 52 }]}>
+                              {m}
+                            </Text>
+                          ))}
+                          <Text style={[styles.sheetTh, styles.sheetThNumber, { width: 90 }]}>Total Paid</Text>
+                          <Text style={[styles.sheetTh, styles.sheetThNumber, { width: 90 }]}>Pending</Text>
+                        </View>
+
+                        {/* Table Rows */}
+                        {reportData?.rows.map((row, idx) => {
+                          let rowPaid = 0;
+                          let rowDue = 0;
+                          const rent = row.tenant.rent_amount || 0;
+
+                          for (let mIdx = 0; mIdx < 12; mIdx++) {
+                            const m = row.months[mIdx];
+                            if (!m) continue;
+                            const totalAmount = m.record?.total_amount ?? m.record?.amount ?? rent;
+                            if (m.status === 'paid') {
+                              rowPaid += (m.record?.paid_amount ?? totalAmount);
+                            } else if (m.status === 'not_paid') {
+                              rowDue += totalAmount;
+                            } else if (m.status === 'partial') {
+                              const p = m.record?.paid_amount ?? 0;
+                              rowPaid += p;
+                              rowDue += Math.max(0, totalAmount - p);
+                            }
+                          }
+
+                          return (
+                            <View
+                              key={row.tenant.id}
+                              style={[
+                                styles.sheetTableRow,
+                                idx % 2 === 1 && styles.sheetTableRowAlt,
+                              ]}
+                            >
+                              <Text style={[styles.sheetTd, { width: 60, fontWeight: '700' }]}>
+                                {row.tenant.flat_number || '—'}
+                              </Text>
+                              <Text style={[styles.sheetTd, { width: 120, fontWeight: '600' }]} numberOfLines={1}>
+                                {row.tenant.name}
+                              </Text>
+                              {MONTH_SHORT.map((_, mIdx) => {
+                                const mData = row.months[mIdx];
+                                const status = mData?.status || 'upcoming';
+                                const payDate = getMonthPaymentDate(mData);
+                                const pAmt = mData?.record?.paid_amount ?? 0;
+                                return (
+                                  <View key={mIdx} style={[styles.sheetTd, styles.sheetTdMonth, { width: 52 }]}>
+                                    {status === 'paid' ? (
+                                      <View style={styles.sheetChipPaid}>
+                                        <Text style={styles.sheetChipPaidText}>✓ Paid</Text>
+                                        {payDate ? <Text style={styles.sheetChipPaidDate}>{payDate}</Text> : null}
+                                      </View>
+                                    ) : status === 'not_paid' ? (
+                                      <View style={styles.sheetChipDue}>
+                                        <Text style={styles.sheetChipDueText}>✕ Due</Text>
+                                      </View>
+                                    ) : status === 'partial' ? (
+                                      <View style={styles.sheetChipPart}>
+                                        <Text style={styles.sheetChipPartText}>
+                                          {pAmt > 0 ? `₹${pAmt.toLocaleString('en-IN')}` : 'Part'}
+                                        </Text>
+                                        {payDate ? <Text style={styles.sheetChipPartDate}>{payDate}</Text> : null}
+                                      </View>
+                                    ) : (
+                                      <Text style={styles.sheetChipUpcomingText}>—</Text>
+                                    )}
+                                  </View>
+                                );
+                              })}
+                              <Text style={[styles.sheetTd, styles.sheetTdNumber, { width: 90, color: '#16A34A', fontWeight: '700' }]}>
+                                ₹{rowPaid.toLocaleString('en-IN')}
+                              </Text>
+                              <Text style={[styles.sheetTd, styles.sheetTdNumber, { width: 90, color: rowDue > 0 ? '#DC2626' : '#64748B', fontWeight: '700' }]}>
+                                {rowDue > 0 ? `₹${rowDue.toLocaleString('en-IN')}` : '—'}
+                              </Text>
+                            </View>
+                          );
+                        })}
+
+                        {/* Table Footer Totals */}
+                        <View style={styles.sheetTableFooterRow}>
+                          <Text style={[styles.sheetTf, { width: 180, fontWeight: '800' }]}>MONTHLY TOTALS</Text>
+                          {MONTH_SHORT.map((_, mIdx) => (
+                            <View key={mIdx} style={[styles.sheetTf, styles.sheetTdMonth, { width: 52 }]}>
+                              <Text style={styles.sheetTfMonthText}>
+                                {viewerTotals.collected[mIdx] > 0
+                                  ? `₹${viewerTotals.collected[mIdx] >= 1000 ? `${Math.round(viewerTotals.collected[mIdx] / 1000)}k` : viewerTotals.collected[mIdx]}`
+                                  : '—'}
+                              </Text>
+                            </View>
+                          ))}
+                          <Text style={[styles.sheetTf, styles.sheetTdNumber, { width: 90, color: '#15803D', fontWeight: '800' }]}>
+                            ₹{viewerTotals.totalPaid.toLocaleString('en-IN')}
+                          </Text>
+                          <Text style={[styles.sheetTf, styles.sheetTdNumber, { width: 90, color: '#B91C1C', fontWeight: '800' }]}>
+                            ₹{viewerTotals.totalDue.toLocaleString('en-IN')}
+                          </Text>
+                        </View>
+                      </View>
+                    </View>
+                  ) : null}
 
                   {/* Sheet Legend & Footer */}
                   <View style={styles.sheetLegendRow}>
@@ -1380,8 +2794,85 @@ export default function RentReportScreen() {
               </View>
             ) : (
               <View style={styles.buildingsGrid}>
+                {/* All Buildings Consolidated Report Hero Card */}
+                <View style={styles.consolidatedHeroCard}>
+                  <View style={styles.consolidatedTopRow}>
+                    <View style={styles.consolidatedIconCircle}>
+                      <MaterialCommunityIcons name="file-document-multiple" size={24} color="#FFFFFF" />
+                    </View>
+                    <View style={styles.consolidatedTexts}>
+                      <View style={styles.consolidatedTitleRow}>
+                        <Text style={styles.consolidatedTitle}>All Buildings Report</Text>
+                        {/* <View style={styles.consolidatedYearPill}>
+                          <TouchableOpacity
+                            onPress={handlePrevYear}
+                            style={styles.heroYearArrowBtn}
+                            hitSlop={{ top: 6, bottom: 6, left: 6, right: 6 }}
+                          >
+                            <MaterialCommunityIcons name="chevron-left" size={16} color="#701A24" />
+                          </TouchableOpacity>
+                          <Text style={styles.consolidatedYearText}>{selectedYear}</Text>
+                          <TouchableOpacity
+                            onPress={handleNextYear}
+                            style={styles.heroYearArrowBtn}
+                            hitSlop={{ top: 6, bottom: 6, left: 6, right: 6 }}
+                          >
+                            <MaterialCommunityIcons name="chevron-right" size={16} color="#701A24" />
+                          </TouchableOpacity>
+                        </View> */}
+                      </View>
+
+                      <View style={styles.consolidatedStatsRow}>
+                        <View style={styles.consolidatedStatChip}>
+                          <MaterialCommunityIcons name="office-building" size={13} color="#701A24" />
+                          <Text style={styles.consolidatedStatChipText}>{properties.length} Properties</Text>
+                        </View>
+                        <View style={styles.consolidatedStatChip}>
+                          <MaterialCommunityIcons name="door" size={13} color="#701A24" />
+                          <Text style={styles.consolidatedStatChipText}>
+                            {properties.reduce((acc, p) => acc + (p.units || 0), 0)} Units
+                          </Text>
+                        </View>
+                        <View style={styles.consolidatedStatChip}>
+                          <MaterialCommunityIcons name="account-group" size={13} color="#166534" />
+                          <Text style={[styles.consolidatedStatChipText, { color: '#166534' }]}>
+                            {properties.reduce((acc, p) => acc + (p.occupiedCount || 0), 0)} Occupied
+                          </Text>
+                        </View>
+                      </View>
+                    </View>
+                  </View>
+
+                  <View style={styles.consolidatedActionsRow}>
+                    <TouchableOpacity
+                      style={styles.consolidatedViewBtn}
+                      onPress={() => {
+                        setIsAllBuildings(true);
+                      }}
+                      activeOpacity={0.85}
+                    >
+                      <MaterialCommunityIcons name="table-large" size={16} color="#FFFFFF" />
+                      <Text style={styles.consolidatedViewBtnText}>View All Buildings</Text>
+                    </TouchableOpacity>
+
+                    <TouchableOpacity
+                      style={[styles.consolidatedDownloadBtn, isExportingPdf && { opacity: 0.7 }]}
+                      onPress={handleDownloadAllBuildingsPdf}
+                      disabled={isExportingPdf}
+                      activeOpacity={0.85}
+                    >
+                      {isExportingPdf ? (
+                        <ActivityIndicator size="small" color="#701A24" />
+                      ) : (
+                        <MaterialCommunityIcons name="file-pdf-box" size={18} color="#701A24" />
+                      )}
+                      <Text style={styles.consolidatedDownloadBtnText}>Download PDF</Text>
+                    </TouchableOpacity>
+                  </View>
+                </View>
+
                 <Text style={styles.sectionHeading}>
-                  All Buildings ({properties.length})
+                  Individual Buildings ({properties.length})
                 </Text>
 
                 {properties.map((prop) => (
@@ -2328,5 +3819,402 @@ const styles = StyleSheet.create({
     fontSize: 10,
     fontWeight: '500',
     fontStyle: 'italic',
+  },
+
+  // Portfolio Badges
+  portfolioBadge: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 5,
+    backgroundColor: '#FDF0F2',
+    paddingHorizontal: 10,
+    paddingVertical: 4,
+    borderRadius: 14,
+    borderWidth: 1,
+    borderColor: '#F8D3D8',
+  },
+  portfolioBadgeText: {
+    color: '#701A24',
+    fontSize: 11,
+    fontWeight: '700',
+    letterSpacing: 0.3,
+  },
+
+  // KPI Metric Strip in Landscape
+  kpiStripRow: {
+    flexDirection: 'row',
+    gap: 8,
+    marginBottom: 10,
+    flexWrap: 'wrap',
+  },
+  kpiPill: {
+    flex: 1,
+    minWidth: 100,
+    borderWidth: 1,
+    borderRadius: 8,
+    paddingVertical: 6,
+    paddingHorizontal: 8,
+  },
+  kpiPillLabel: {
+    fontSize: 9,
+    fontWeight: '800',
+    color: '#64748B',
+    letterSpacing: 0.4,
+  },
+  kpiPillValue: {
+    fontSize: 13,
+    fontWeight: '800',
+    marginTop: 1,
+  },
+
+  // Portfolio Filter Tabs
+  portfolioFilterStrip: {
+    marginBottom: 10,
+  },
+  portfolioTabsContent: {
+    gap: 8,
+    paddingVertical: 2,
+  },
+  portfolioTab: {
+    paddingHorizontal: 12,
+    paddingVertical: 5,
+    borderRadius: 20,
+    backgroundColor: '#F1F5F9',
+    borderWidth: 1,
+    borderColor: '#CBD5E1',
+  },
+  portfolioTabActive: {
+    backgroundColor: '#701A24',
+    borderColor: '#701A24',
+  },
+  portfolioTabText: {
+    fontSize: 11,
+    fontWeight: '700',
+    color: '#475569',
+  },
+  portfolioTabTextActive: {
+    color: '#FFFFFF',
+  },
+
+  // Building Section Header inside Table
+  bldgHeaderFixedRow: {
+    height: 32,
+    backgroundColor: '#F8FAFC',
+    borderBottomWidth: 1,
+    borderBottomColor: '#CBD5E1',
+    justifyContent: 'center',
+  },
+  bldgHeaderText: {
+    fontSize: 12,
+    fontWeight: '800',
+    color: '#701A24',
+  },
+  bldgHeaderScrollRow: {
+    height: 32,
+    backgroundColor: '#F8FAFC',
+    borderBottomWidth: 1,
+    borderBottomColor: '#CBD5E1',
+    justifyContent: 'center',
+    paddingHorizontal: 12,
+    width: MONTH_COL_WIDTH * 12 + 160,
+  },
+  bldgHeaderSpanText: {
+    fontSize: 11,
+    fontWeight: '600',
+    color: '#64748B',
+  },
+  emptyTenantRowText: {
+    fontSize: 11,
+    color: '#94A3B8',
+    fontStyle: 'italic',
+  },
+
+  // Subtotal Rows
+  bldgSubtotalFixedRow: {
+    flexDirection: 'row',
+    height: 34,
+    alignItems: 'center',
+    backgroundColor: '#F8FAFC',
+    borderTopWidth: 1,
+    borderTopColor: '#E2E8F0',
+    borderBottomWidth: 1,
+    borderBottomColor: '#CBD5E1',
+  },
+  bldgSubtotalFixedText: {
+    fontSize: 11,
+    fontWeight: '800',
+    color: '#334155',
+  },
+  subtotalDash: {
+    fontSize: 11,
+    color: '#94A3B8',
+  },
+  bldgSubtotalScrollRow: {
+    flexDirection: 'row',
+    height: 34,
+    alignItems: 'center',
+    backgroundColor: '#F8FAFC',
+    borderTopWidth: 1,
+    borderTopColor: '#E2E8F0',
+    borderBottomWidth: 1,
+    borderBottomColor: '#CBD5E1',
+  },
+  subtotalMonthText: {
+    fontSize: 10,
+    fontWeight: '700',
+    color: '#15803D',
+  },
+  subtotalPaidText: {
+    fontSize: 11,
+    fontWeight: '800',
+    color: '#15803D',
+    textAlign: 'right',
+  },
+  subtotalDueText: {
+    fontSize: 11,
+    fontWeight: '800',
+    color: '#64748B',
+    textAlign: 'right',
+  },
+
+  // Grand Total Rows
+  grandTotalFixedRow: {
+    flexDirection: 'row',
+    height: 38,
+    alignItems: 'center',
+    backgroundColor: '#FDF0F2',
+    borderTopWidth: 2,
+    borderTopColor: '#701A24',
+    borderBottomWidth: 2,
+    borderBottomColor: '#701A24',
+  },
+  grandTotalFixedText: {
+    fontSize: 11,
+    fontWeight: '900',
+    color: '#701A24',
+  },
+  grandTotalDash: {
+    fontSize: 11,
+    color: '#701A24',
+    fontWeight: '700',
+  },
+  grandTotalScrollRow: {
+    flexDirection: 'row',
+    height: 38,
+    alignItems: 'center',
+    backgroundColor: '#FDF0F2',
+    borderTopWidth: 2,
+    borderTopColor: '#701A24',
+    borderBottomWidth: 2,
+    borderBottomColor: '#701A24',
+  },
+  grandTotalMonthText: {
+    fontSize: 10.5,
+    fontWeight: '800',
+    color: '#701A24',
+  },
+  grandTotalPaidText: {
+    fontSize: 11.5,
+    fontWeight: '900',
+    color: '#15803D',
+    textAlign: 'right',
+  },
+  grandTotalDueText: {
+    fontSize: 11.5,
+    fontWeight: '900',
+    color: '#B91C1C',
+    textAlign: 'right',
+  },
+
+  // Column summaries
+  summaryCell: {
+    justifyContent: 'center',
+    paddingHorizontal: 8,
+    borderLeftWidth: 1,
+    borderLeftColor: '#E2E8F0',
+  },
+  headerCellTextRight: {
+    color: '#475569',
+    fontSize: 11,
+    fontWeight: '700',
+    letterSpacing: 0.3,
+    textAlign: 'right',
+  },
+  rowPaidText: {
+    fontSize: 11,
+    fontWeight: '700',
+    color: '#16A34A',
+    textAlign: 'right',
+  },
+  rowDueText: {
+    fontSize: 11,
+    fontWeight: '600',
+    color: '#64748B',
+    textAlign: 'right',
+  },
+  rowDueTextAlert: {
+    color: '#DC2626',
+    fontWeight: '800',
+  },
+
+  // Consolidated Hero Card in Portrait View
+  consolidatedHeroCard: {
+    backgroundColor: '#FFFFFF',
+    borderRadius: 14,
+    borderWidth: 1.5,
+    borderColor: '#F8D3D8',
+    padding: 16,
+    marginBottom: 16,
+    shadowColor: '#701A24',
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.1,
+    shadowRadius: 10,
+    elevation: 3,
+  },
+  consolidatedTopRow: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    gap: 12,
+  },
+  consolidatedIconCircle: {
+    width: 44,
+    height: 44,
+    borderRadius: 22,
+    backgroundColor: '#701A24',
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  consolidatedTexts: {
+    flex: 1,
+  },
+  consolidatedTitleRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+  },
+  consolidatedTitle: {
+    fontSize: 17,
+    fontWeight: '800',
+    color: '#0F172A',
+  },
+  consolidatedYearPill: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#FDF0F2',
+    borderWidth: 1,
+    borderColor: '#F8D3D8',
+    borderRadius: 6,
+    paddingHorizontal: 4,
+    paddingVertical: 1,
+    gap: 2,
+  },
+  heroYearArrowBtn: {
+    padding: 2,
+  },
+  consolidatedYearText: {
+    fontSize: 12,
+    fontWeight: '800',
+    color: '#701A24',
+  },
+  consolidatedSubtitle: {
+    fontSize: 12,
+    color: '#64748B',
+    marginTop: 3,
+    lineHeight: 16,
+  },
+  consolidatedStatsRow: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 6,
+    marginTop: 8,
+  },
+  consolidatedStatChip: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+    backgroundColor: '#F8FAFC',
+    borderWidth: 1,
+    borderColor: '#E2E8F0',
+    borderRadius: 6,
+    paddingHorizontal: 7,
+    paddingVertical: 2,
+  },
+  consolidatedStatChipText: {
+    fontSize: 11,
+    fontWeight: '700',
+    color: '#334155',
+  },
+  consolidatedActionsRow: {
+    flexDirection: 'row',
+    gap: 10,
+    marginTop: 14,
+    paddingTop: 12,
+    borderTopWidth: 1,
+    borderTopColor: '#F1F5F9',
+  },
+  consolidatedViewBtn: {
+    flex: 1.2,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 6,
+    backgroundColor: '#701A24',
+    paddingVertical: 10,
+    borderRadius: 9,
+    shadowColor: '#701A24',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.25,
+    shadowRadius: 4,
+    elevation: 2,
+  },
+  consolidatedViewBtnText: {
+    color: '#FFFFFF',
+    fontWeight: '700',
+    fontSize: 13,
+  },
+  consolidatedDownloadBtn: {
+    flex: 1,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 6,
+    backgroundColor: '#FDF0F2',
+    borderWidth: 1,
+    borderColor: '#F8D3D8',
+    paddingVertical: 10,
+    borderRadius: 9,
+  },
+  consolidatedDownloadBtnText: {
+    color: '#701A24',
+    fontWeight: '700',
+    fontSize: 13,
+  },
+
+  // In-App Document Viewer Sheet additions
+  sheetBldgSection: {
+    marginBottom: 14,
+  },
+  sheetBldgHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    backgroundColor: '#F8FAFC',
+    borderWidth: 1,
+    borderBottomWidth: 0,
+    borderColor: '#CBD5E1',
+    borderTopLeftRadius: 6,
+    borderTopRightRadius: 6,
+    paddingHorizontal: 8,
+    paddingVertical: 6,
+  },
+  sheetBldgTitle: {
+    fontSize: 12,
+    fontWeight: '800',
+    color: '#701A24',
+  },
+  sheetBldgSummary: {
+    fontSize: 10,
+    fontWeight: '600',
+    color: '#475569',
   },
 });

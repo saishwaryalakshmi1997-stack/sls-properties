@@ -1896,6 +1896,26 @@ export interface PropertyWithCounts extends Property {
   occupiedCount: number;
 }
 
+export interface ConsolidatedBuildingReport {
+  property: PropertyWithCounts;
+  report: RentReportResult;
+  totalPaid: number;
+  totalPending: number;
+  monthlyCollected: number[];
+  monthlyDue: number[];
+}
+
+export interface ConsolidatedRentReportResult {
+  year: number;
+  buildings: ConsolidatedBuildingReport[];
+  totalTenants: number;
+  totalUnits: number;
+  totalPaid: number;
+  totalPending: number;
+  monthlyCollected: number[];
+  monthlyDue: number[];
+}
+
 export async function getPropertiesWithCounts(): Promise<PropertyWithCounts[]> {
   try {
     const db = await getDatabase();
@@ -2032,6 +2052,96 @@ export async function getRentReportForProperty(
       property: null,
       year,
       rows: [],
+    };
+  }
+}
+
+export async function getAllBuildingsRentReport(
+  year: number
+): Promise<ConsolidatedRentReportResult> {
+  try {
+    const properties = await getPropertiesWithCounts();
+    const buildings: ConsolidatedBuildingReport[] = [];
+    const overallMonthlyCollected: number[] = new Array(12).fill(0);
+    const overallMonthlyDue: number[] = new Array(12).fill(0);
+    let overallTotalPaid = 0;
+    let overallTotalPending = 0;
+    let overallTotalTenants = 0;
+    let overallTotalUnits = 0;
+
+    for (const prop of properties) {
+      const report = await getRentReportForProperty(prop.id, year);
+      overallTotalUnits += prop.units || 0;
+      overallTotalTenants += report.rows.length;
+
+      const bMonthlyCollected: number[] = new Array(12).fill(0);
+      const bMonthlyDue: number[] = new Array(12).fill(0);
+      let bTotalPaid = 0;
+      let bTotalPending = 0;
+
+      for (const row of report.rows) {
+        const rent = row.tenant.rent_amount || 0;
+        for (let mIdx = 0; mIdx < 12; mIdx++) {
+          const monthData = row.months[mIdx];
+          const status = monthData?.status || 'upcoming';
+          const totalAmount = monthData?.record?.total_amount ?? monthData?.record?.amount ?? rent;
+
+          let paid = 0;
+          let due = 0;
+          if (status === 'paid') {
+            paid = monthData?.record?.paid_amount ?? totalAmount;
+          } else if (status === 'not_paid') {
+            due = totalAmount;
+          } else if (status === 'partial') {
+            paid = monthData?.record?.paid_amount ?? 0;
+            due = Math.max(0, totalAmount - paid);
+          }
+
+          bTotalPaid += paid;
+          bTotalPending += due;
+          bMonthlyCollected[mIdx] += paid;
+          bMonthlyDue[mIdx] += due;
+        }
+      }
+
+      overallTotalPaid += bTotalPaid;
+      overallTotalPending += bTotalPending;
+      for (let mIdx = 0; mIdx < 12; mIdx++) {
+        overallMonthlyCollected[mIdx] += bMonthlyCollected[mIdx];
+        overallMonthlyDue[mIdx] += bMonthlyDue[mIdx];
+      }
+
+      buildings.push({
+        property: prop,
+        report,
+        totalPaid: bTotalPaid,
+        totalPending: bTotalPending,
+        monthlyCollected: bMonthlyCollected,
+        monthlyDue: bMonthlyDue,
+      });
+    }
+
+    return {
+      year,
+      buildings,
+      totalTenants: overallTotalTenants,
+      totalUnits: overallTotalUnits,
+      totalPaid: overallTotalPaid,
+      totalPending: overallTotalPending,
+      monthlyCollected: overallMonthlyCollected,
+      monthlyDue: overallMonthlyDue,
+    };
+  } catch (err) {
+    console.error('[SQLite] getAllBuildingsRentReport error:', err);
+    return {
+      year,
+      buildings: [],
+      totalTenants: 0,
+      totalUnits: 0,
+      totalPaid: 0,
+      totalPending: 0,
+      monthlyCollected: new Array(12).fill(0),
+      monthlyDue: new Array(12).fill(0),
     };
   }
 }

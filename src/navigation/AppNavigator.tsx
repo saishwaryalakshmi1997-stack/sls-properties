@@ -9,7 +9,7 @@ import { Colors } from '../theme/colors';
 
 export type RootTabParamList = {
   Dashboard: { propertyId?: number } | undefined;
-  'Rent Report': { propertyId?: number } | undefined;
+  'Rent Report': { propertyId?: number; allBuildings?: boolean } | undefined;
   'Add Property': { propertyId?: number; buildingName?: string } | undefined;
 };
 

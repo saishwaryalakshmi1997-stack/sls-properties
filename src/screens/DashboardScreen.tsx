@@ -43,7 +43,7 @@ export default function DashboardScreen() {
       setLoading(true);
       const result = await initDatabaseAndTest();
       setDbStatus(result);
-      await syncAll().catch(() => {});
+      await syncAll().catch(() => { });
       await loadStats();
     } catch (err) {
       console.error('[Dashboard] Error in runTestAndLoad:', err);
@@ -99,10 +99,10 @@ export default function DashboardScreen() {
   useFocusEffect(
     useCallback(() => {
       // Ensure Dashboard is always portrait
-      ScreenOrientation.lockAsync(ScreenOrientation.OrientationLock.PORTRAIT_UP).catch(() => {});
+      ScreenOrientation.lockAsync(ScreenOrientation.OrientationLock.PORTRAIT_UP).catch(() => { });
       // Refresh stats when returning to screen
       loadStats();
-      syncAll().then(() => loadStats()).catch(() => {});
+      syncAll().then(() => loadStats()).catch(() => { });
     }, [])
   );
 
@@ -233,8 +233,10 @@ export default function DashboardScreen() {
               activeOpacity={0.85}
             >
               <MaterialCommunityIcons name="plus-circle" size={18} color="#FFFFFF" />
-              <Text style={styles.actionBtnPrimaryText}>Add New Property</Text>
+              <Text style={styles.actionBtnPrimaryText}>Add Property</Text>
             </TouchableOpacity>
+
+
           </View>
 
 
