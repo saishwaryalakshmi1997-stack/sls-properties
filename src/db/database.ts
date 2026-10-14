@@ -1,5 +1,72 @@
 import * as SQLite from 'expo-sqlite';
 
+// ---------------- OBSERVER LISTENERS FOR DECOUPLED SYNC ---------------- //
+// This allows sync.ts to observe database events without database.ts importing sync.ts.
+// Eliminates the Metro Require Cycle.
+type ChangeListener = () => void;
+type IdListener = (id: number) => void;
+
+const changeListeners: ChangeListener[] = [];
+const propDeleteListeners: IdListener[] = [];
+const tenantDeleteListeners: IdListener[] = [];
+const payDeleteListeners: IdListener[] = [];
+
+export function onDatabaseChange(fn: ChangeListener) {
+  changeListeners.push(fn);
+}
+
+export function onPropertyDeleted(fn: IdListener) {
+  propDeleteListeners.push(fn);
+}
+
+export function onTenantDeleted(fn: IdListener) {
+  tenantDeleteListeners.push(fn);
+}
+
+export function onPaymentDeleted(fn: IdListener) {
+  payDeleteListeners.push(fn);
+}
+
+function notifyChange() {
+  changeListeners.forEach((fn) => {
+    try {
+      fn();
+    } catch (err) {
+      console.warn('[SQLite] Change listener error:', err);
+    }
+  });
+}
+
+function notifyPropertyDeleted(id: number) {
+  propDeleteListeners.forEach((fn) => {
+    try {
+      fn(id);
+    } catch (err) {
+      console.warn('[SQLite] Property delete listener error:', err);
+    }
+  });
+}
+
+function notifyTenantDeleted(id: number) {
+  tenantDeleteListeners.forEach((fn) => {
+    try {
+      fn(id);
+    } catch (err) {
+      console.warn('[SQLite] Tenant delete listener error:', err);
+    }
+  });
+}
+
+function notifyPaymentDeleted(id: number) {
+  payDeleteListeners.forEach((fn) => {
+    try {
+      fn(id);
+    } catch (err) {
+      console.warn('[SQLite] Payment delete listener error:', err);
+    }
+  });
+}
+
 export interface TestLogRecord {
   id: number;
   message: string;
@@ -386,6 +453,9 @@ export async function initDatabaseAndTest(): Promise<DbTestResult> {
 
     const latest = allRecords[0];
 
+    // Trigger silent cloud sync in the background
+    notifyChange();
+
     return {
       success: true,
       message: 'SQLite database is active and read/write verified.',
@@ -468,6 +538,7 @@ export async function insertProperty(input: PropertyInput): Promise<number> {
       now,
     ]
   );
+  notifyChange();
   return result.lastInsertRowId;
 }
 
@@ -492,6 +563,7 @@ export async function updateProperty(
       id,
     ]
   );
+  notifyChange();
 }
 
 export async function deleteProperty(id: number): Promise<void> {
@@ -501,6 +573,8 @@ export async function deleteProperty(id: number): Promise<void> {
     await db.runAsync('DELETE FROM tenants WHERE property_id = ?', [id]);
     await db.runAsync('DELETE FROM payments WHERE property_id = ?', [id]);
     await db.runAsync('DELETE FROM payment_transactions WHERE property_id = ?', [id]);
+    notifyPropertyDeleted(id);
+    notifyChange();
   } catch (err) {
     console.error('[SQLite] deleteProperty error:', err);
     throw err;
@@ -843,6 +917,7 @@ export async function addOrUpdateTenant(input: TenantInput): Promise<number> {
     await saveFlatEbNumber(input.property_id, input.flat_number.trim(), input.eb_number.trim());
   }
 
+  notifyChange();
   return tenantId;
 }
 
@@ -879,6 +954,7 @@ export async function removeTenantFromFlat(
     'DELETE FROM payment_transactions WHERE property_id = ? AND flat_number = ?',
     [propertyId, cleanFlat]
   );
+  notifyChange();
 }
 
 export async function removeTenantById(tenantId: number): Promise<void> {
@@ -905,6 +981,8 @@ export async function removeTenantById(tenantId: number): Promise<void> {
     ]);
   }
   await db.runAsync('DELETE FROM tenants WHERE id = ?', [tenantId]);
+  notifyTenantDeleted(tenantId);
+  notifyChange();
 }
 
 export async function updateTenantMeterReadings(
@@ -1524,6 +1602,8 @@ export async function markPaymentAsPaid(
     }
   }
 
+  notifyChange();
+
   return {
     id: lastRecordId,
     status: lastStatus,
@@ -1647,6 +1727,8 @@ export async function updatePaymentRecord(
       );
     }
   }
+
+  notifyChange();
 }
 
 export async function deletePaymentTransaction(
@@ -1689,6 +1771,8 @@ export async function deletePaymentTransaction(
       [newPaidAmount, newStatus, finalPaidDate, finalNotes, now, existing.id]
     );
   }
+
+  notifyChange();
 }
 
 export async function deleteFullPayment(
@@ -1726,8 +1810,11 @@ export async function deleteFullPayment(
     );
     if (!nextTxCount || nextTxCount.count === 0) {
       await db.runAsync('DELETE FROM payments WHERE id = ?', [nextRec.id]);
+      notifyPaymentDeleted(nextRec.id);
     }
   }
+
+  notifyChange();
 }
 
 export async function getAllPaymentsForProperty(propertyId: number): Promise<PaymentRecord[]> {

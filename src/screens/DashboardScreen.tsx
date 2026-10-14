@@ -19,6 +19,7 @@ import {
   PropertyStats,
   Property,
 } from '../db/database';
+import { syncAll } from '../db/sync';
 import { Colors } from '../theme/colors';
 import * as ScreenOrientation from 'expo-screen-orientation';
 import PropertyDetailsScreen from './PropertyDetailsScreen';
@@ -42,6 +43,7 @@ export default function DashboardScreen() {
       setLoading(true);
       const result = await initDatabaseAndTest();
       setDbStatus(result);
+      await syncAll().catch(() => {});
       await loadStats();
     } catch (err) {
       console.error('[Dashboard] Error in runTestAndLoad:', err);
@@ -100,6 +102,7 @@ export default function DashboardScreen() {
       ScreenOrientation.lockAsync(ScreenOrientation.OrientationLock.PORTRAIT_UP).catch(() => {});
       // Refresh stats when returning to screen
       loadStats();
+      syncAll().then(() => loadStats()).catch(() => {});
     }, [])
   );
 

@@ -224,8 +224,8 @@ export default function PropertyDetailsScreen({
             balance === 0 || dueUnpaidList.length === 0
               ? 'Paid'
               : dueUnpaidList.some((p) => p.status === 'Partial')
-              ? 'Partial'
-              : 'Pending';
+                ? 'Partial'
+                : 'Pending';
           const unpaidCount = dueUnpaidList.length;
           statusMap[flat.flat_number] = { status, balance, paid, total, unpaidCount };
         }
@@ -553,10 +553,17 @@ export default function PropertyDetailsScreen({
     if (tenantDueDay && (Number(tenantDueDay) < 1 || Number(tenantDueDay) > 31)) {
       errors.dueDay = 'Due day must be 1 to 31';
     }
+    if (!ebNumber.trim()) {
+      errors.ebNumber = 'EB / Consumer number is required';
+    }
 
     setFormErrors((prev) => ({ ...prev, ...errors }));
     if (Object.keys(errors).length > 0) {
-      Toast.warning('Invalid Details', 'Please verify rent amount and due day.');
+      if (errors.ebNumber) {
+        Toast.warning('EB Number Required', 'Please enter the EB / Consumer number for this flat.');
+      } else {
+        Toast.warning('Invalid Details', 'Please verify rent amount and due day.');
+      }
       return;
     }
 
@@ -819,19 +826,7 @@ export default function PropertyDetailsScreen({
             />
           </TouchableOpacity>
 
-          {/* Circular (+) Button on left matching Picture 1 */}
-          {!isFlatsCollapsed && (
-            <View style={styles.circlePlusRow}>
-              <TouchableOpacity
-                style={styles.circlePlusBtn}
-                onPress={() => handleOpenAddTenant()}
-                activeOpacity={0.85}
-                hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
-              >
-                <MaterialCommunityIcons name="plus" size={20} color="#FFFFFF" />
-              </TouchableOpacity>
-            </View>
-          )}
+
 
           {/* Flats List */}
           {!isFlatsCollapsed && (
@@ -1477,16 +1472,23 @@ export default function PropertyDetailsScreen({
                   {/* EB (Electricity Board) Number Card */}
                   <View style={styles.utilityCardContainer}>
                     <View style={styles.utilityPillBadge}>
-                      <Text style={styles.utilityPillText}>EB Details</Text>
+                      <Text style={styles.utilityPillText}>EB Details*</Text>
                     </View>
                     <View style={styles.utilityCardBody}>
                       <FloatingLabelInput
                         label="EB / Consumer Number"
+                        required
                         value={ebNumber}
-                        onChangeText={setEbNumber}
+                        onChangeText={(t) => {
+                          setEbNumber(t);
+                          if (formErrors.ebNumber) {
+                            setFormErrors((prev) => ({ ...prev, ebNumber: '' }));
+                          }
+                        }}
+                        error={formErrors.ebNumber}
                       />
                       <Text style={styles.ebFixedCaption}>
-                        ⚡ Fixed for this flat. Preserved in database even if tenant vacates.
+                        ⚡ Fixed for this flat. Required for electricity billing and records.
                       </Text>
                     </View>
                   </View>
@@ -1530,8 +1532,8 @@ export default function PropertyDetailsScreen({
               activeDatePicker === 'rent_start'
                 ? tenantRentStartDate
                 : activeDatePicker === 'security_deposit'
-                ? securityDepositDate
-                : getTodayFormatted()
+                  ? securityDepositDate
+                  : getTodayFormatted()
             }
             onChange={(newDate) => {
               if (activeDatePicker === 'rent_start') setTenantRentStartDate(newDate);

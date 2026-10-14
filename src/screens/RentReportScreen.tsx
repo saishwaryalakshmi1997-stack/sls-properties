@@ -28,6 +28,7 @@ import {
   getPropertiesWithCounts,
   getRentReportForProperty,
 } from '../db/database';
+import { syncAll } from '../db/sync';
 import { Colors } from '../theme/colors';
 
 const ROW_HEIGHT = 44;
@@ -765,11 +766,15 @@ export default function RentReportScreen() {
 
   const handleRefresh = () => {
     setRefreshing(true);
-    if (selectedProperty) {
-      loadReport(selectedProperty.id, selectedYear).then(() => setRefreshing(false));
-    } else {
-      loadProperties();
-    }
+    syncAll()
+      .catch(() => {})
+      .finally(() => {
+        if (selectedProperty) {
+          loadReport(selectedProperty.id, selectedYear).then(() => setRefreshing(false));
+        } else {
+          loadProperties();
+        }
+      });
   };
 
   const handlePrevYear = () => {
