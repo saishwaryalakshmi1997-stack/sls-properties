@@ -31,6 +31,7 @@ import {
   isRentDue,
   getFlatEbNumber,
   saveFlatEbNumber,
+  formatFlatNumber,
 } from '../db/database';
 import { Colors } from '../theme/colors';
 import TenantViewScreen from './TenantViewScreen';
@@ -205,7 +206,12 @@ export default function PropertyDetailsScreen({
 
       for (const flat of data) {
         if (flat.is_occupied && flat.tenant) {
-          const flatPayments = allPayments.filter((p) => p.flat_number.trim() === flat.flat_number.trim());
+          const normFlat = formatFlatNumber(flat.flat_number);
+          const flatPayments = allPayments.filter(
+            (p) =>
+              p.flat_number.trim().toLowerCase() === flat.flat_number.trim().toLowerCase() ||
+              formatFlatNumber(p.flat_number).toLowerCase() === normFlat.toLowerCase()
+          );
           const dueUnpaidList = flatPayments.filter((p) => p.status !== 'Paid' && isRentDue(p.month_year));
           let balance = 0;
           for (const p of flatPayments) {
@@ -228,6 +234,7 @@ export default function PropertyDetailsScreen({
                 : 'Pending';
           const unpaidCount = dueUnpaidList.length;
           statusMap[flat.flat_number] = { status, balance, paid, total, unpaidCount };
+          statusMap[normFlat] = statusMap[flat.flat_number];
         }
       }
       setFlatPaymentStatusMap(statusMap);
@@ -251,7 +258,7 @@ export default function PropertyDetailsScreen({
     let sum = 0;
     for (const flat of flats) {
       if (flat.is_occupied && flat.tenant) {
-        const pay = flatPaymentStatusMap[flat.flat_number];
+        const pay = flatPaymentStatusMap[flat.flat_number] || flatPaymentStatusMap[formatFlatNumber(flat.flat_number)];
         if (pay) {
           sum += pay.balance;
         }
@@ -317,7 +324,7 @@ export default function PropertyDetailsScreen({
 
     if (flat) {
       setSelectedFlat(flat);
-      setTenantFlatNumber(flat.flat_number);
+      setTenantFlatNumber(formatFlatNumber(flat.flat_number));
       if (flat.tenant) {
         setTenantName(flat.tenant.name || '');
         setTenantPhone(flat.tenant.phone_number || '');
@@ -347,7 +354,7 @@ export default function PropertyDetailsScreen({
     } else {
       setSelectedFlat(null);
       const firstVacant = flats.find((f) => !f.is_occupied);
-      const flatNum = firstVacant ? firstVacant.flat_number : (flats.length > 0 ? flats[0].flat_number : 'Flat 1');
+      const flatNum = firstVacant ? formatFlatNumber(firstVacant.flat_number) : (flats.length > 0 ? formatFlatNumber(flats[0].flat_number) : 'Flat 1');
       setTenantFlatNumber(flatNum);
       resetTenantForm();
       const eb = firstVacant?.eb_number || (await getFlatEbNumber(property.id, flatNum));
@@ -848,11 +855,11 @@ export default function PropertyDetailsScreen({
                   filteredFlats.map((flat, index) => {
                     const isOccupied = flat.is_occupied && flat.tenant;
                     const tenant = flat.tenant;
-                    const rawNum = flat.flat_number.replace(/^(flat|flats)\s*[-:]?\s*/i, '').trim();
+                    const occupiedTitle = formatFlatNumber(flat.flat_number);
+                    const vacantSubtitle = occupiedTitle;
 
                     if (isOccupied) {
-                      const occupiedTitle = rawNum ? `Flat - ${rawNum}` : flat.flat_number;
-                      const payInfo = flatPaymentStatusMap[flat.flat_number];
+                      const payInfo = flatPaymentStatusMap[flat.flat_number] || flatPaymentStatusMap[occupiedTitle];
                       const balance = payInfo ? payInfo.balance : 0;
                       const isPaid = payInfo ? (payInfo.status === 'Paid' || balance === 0) : true;
 
@@ -910,7 +917,6 @@ export default function PropertyDetailsScreen({
                     }
 
                     // Vacant Flat ("To-let") -> redirect to Add Tenant on tap
-                    const vacantSubtitle = rawNum ? `Flats - ${rawNum}` : flat.flat_number;
                     return (
                       <TouchableOpacity
                         key={`${flat.flat_number}-${index}`}
@@ -963,7 +969,7 @@ export default function PropertyDetailsScreen({
             {/* Header info inside dropdown */}
             <View style={styles.propertyMenuHeader}>
               <Text style={styles.propertyMenuBuildingName} numberOfLines={1}>
-                {selectedFlat?.flat_number}
+                {formatFlatNumber(selectedFlat?.flat_number)}
               </Text>
               <Text style={styles.propertyMenuUnitsSub} numberOfLines={1}>
                 {selectedFlat?.is_occupied
@@ -1247,7 +1253,7 @@ export default function PropertyDetailsScreen({
                   <View style={styles.flatBadgeHeaderRow}>
                     <View style={styles.flatBadgePill}>
                       <MaterialCommunityIcons name="door-open" size={16} color={Colors.primary} />
-                      <Text style={styles.flatBadgePillText}>Flat {tenantFlatNumber}</Text>
+                      <Text style={styles.flatBadgePillText}>{formatFlatNumber(tenantFlatNumber)}</Text>
                     </View>
                     <Text style={styles.flatBadgePropertySub}>{property.building_name}</Text>
                   </View>
@@ -1363,7 +1369,7 @@ export default function PropertyDetailsScreen({
                   <View style={styles.flatBadgeHeaderRow}>
                     <View style={styles.flatBadgePill}>
                       <MaterialCommunityIcons name="door-open" size={16} color={Colors.primary} />
-                      <Text style={styles.flatBadgePillText}>Flat {tenantFlatNumber}</Text>
+                      <Text style={styles.flatBadgePillText}>{formatFlatNumber(tenantFlatNumber)}</Text>
                     </View>
                     <Text style={styles.flatBadgePropertySub}>{property.building_name}</Text>
                   </View>

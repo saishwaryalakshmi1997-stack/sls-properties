@@ -148,6 +148,33 @@ export interface FlatItem {
   eb_number?: string;
 }
 
+/**
+ * Normalizes flat numbers across the entire app so that duplicated prefixes like
+ * "Flat - Flat 1", "Flat - 1", "Flats - 1", "flat-flat1" are cleaned up to "Flat 1".
+ */
+export function formatFlatNumber(flatNumber?: string | null): string {
+  if (!flatNumber || !flatNumber.trim()) return '';
+  const s = flatNumber.trim();
+  
+  const hasFlatPrefix = /^(flat|flats)/i.test(s);
+  
+  let stripped = s;
+  while (/^(flat|flats)\s*[-:]?\s*/i.test(stripped) || /^[-:]+\s*/.test(stripped)) {
+    stripped = stripped.replace(/^(flat|flats)\s*[-:]?\s*/i, '').replace(/^[-:]+\s*/, '').trim();
+  }
+
+  if (!stripped) {
+    return 'Flat 1';
+  }
+
+  if (hasFlatPrefix || /^\d+[A-Za-z]?$/.test(stripped)) {
+    return `Flat ${stripped}`;
+  }
+
+  return s;
+}
+
+
 export interface PaymentTransaction {
   id: number;
   payment_id: number;
@@ -407,6 +434,64 @@ async function ensureTables(db: SQLite.SQLiteDatabase): Promise<void> {
       }
     } catch (txMigErr) {
       console.warn('[SQLite] Transaction backfill notice:', txMigErr);
+    }
+
+    // Clean up legacy flat numbers like "Flat - Flat 1", "Flat - 1", "flat-flat1" to "Flat 1"
+    try {
+      // 1. Tenants
+      const allTenants = await db.getAllAsync<{ id: number; flat_number: string }>(
+        'SELECT id, flat_number FROM tenants'
+      );
+      for (const t of allTenants) {
+        const cleaned = formatFlatNumber(t.flat_number);
+        if (cleaned && cleaned !== t.flat_number) {
+          await db.runAsync('UPDATE tenants SET flat_number = ? WHERE id = ?', [cleaned, t.id]);
+        }
+      }
+
+      // 2. Payments
+      const allPayments = await db.getAllAsync<{ id: number; flat_number: string }>(
+        'SELECT id, flat_number FROM payments'
+      );
+      for (const p of allPayments) {
+        const cleaned = formatFlatNumber(p.flat_number);
+        if (cleaned && cleaned !== p.flat_number) {
+          await db.runAsync('UPDATE payments SET flat_number = ? WHERE id = ?', [cleaned, p.id]);
+        }
+      }
+
+      // 3. Payment Transactions
+      const allTxs = await db.getAllAsync<{ id: number; flat_number: string }>(
+        'SELECT id, flat_number FROM payment_transactions'
+      );
+      for (const tx of allTxs) {
+        const cleaned = formatFlatNumber(tx.flat_number);
+        if (cleaned && cleaned !== tx.flat_number) {
+          await db.runAsync('UPDATE payment_transactions SET flat_number = ? WHERE id = ?', [cleaned, tx.id]);
+        }
+      }
+
+      // 4. Flat EB Numbers
+      const allEbs = await db.getAllAsync<{ property_id: number; flat_number: string; eb_number: string }>(
+        'SELECT property_id, flat_number, eb_number FROM flat_eb_numbers'
+      );
+      for (const eb of allEbs) {
+        const cleaned = formatFlatNumber(eb.flat_number);
+        if (cleaned && cleaned !== eb.flat_number) {
+          await db.runAsync(
+            `INSERT INTO flat_eb_numbers (property_id, flat_number, eb_number, updated_at)
+             VALUES (?, ?, ?, ?)
+             ON CONFLICT(property_id, flat_number) DO UPDATE SET eb_number = excluded.eb_number`,
+            [eb.property_id, cleaned, eb.eb_number, new Date().toISOString()]
+          );
+          await db.runAsync(
+            'DELETE FROM flat_eb_numbers WHERE property_id = ? AND flat_number = ?',
+            [eb.property_id, eb.flat_number]
+          );
+        }
+      }
+    } catch (cleanFlatErr) {
+      console.warn('[SQLite] Flat number normalization notice:', cleanFlatErr);
     }
   } catch (migErr) {
     console.warn('[SQLite] Column migration notice:', migErr);
@@ -693,34 +778,40 @@ export async function getFlatsForProperty(
     const count = Math.max(1, totalUnitsCount || 1);
 
     for (let i = 1; i <= count; i++) {
-      const standardName = `Flat - Flat ${i}`;
-      const alt1 = `Flat ${i}`;
+      const standardName = `Flat ${i}`;
       const alt2 = `${i}`;
 
       const matched = tenants.find((t) => {
         if (assignedTenantIds.has(t.id)) return false;
-        const fn = t.flat_number.trim().toLowerCase();
+        const normT = formatFlatNumber(t.flat_number).toLowerCase();
+        const std = standardName.toLowerCase();
+        const rawT = t.flat_number.trim().toLowerCase();
         return (
-          fn === standardName.toLowerCase() ||
-          fn === alt1.toLowerCase() ||
-          fn === alt2.toLowerCase()
+          normT === std ||
+          rawT === std ||
+          rawT === alt2.toLowerCase() ||
+          rawT === `flat-${i}` ||
+          rawT === `flat-flat${i}` ||
+          rawT === `flat - flat ${i}`
         );
       });
 
       const preservedEb =
         ebMap.get(standardName.toLowerCase()) ||
-        ebMap.get(alt1.toLowerCase()) ||
         ebMap.get(alt2.toLowerCase()) ||
+        (matched ? ebMap.get(matched.flat_number.trim().toLowerCase()) : '') ||
         matched?.eb_number ||
         '';
 
       if (matched) {
         assignedTenantIds.add(matched.id);
+        const normFlat = formatFlatNumber(matched.flat_number);
         flats.push({
-          flat_number: matched.flat_number,
+          flat_number: normFlat,
           is_occupied: true,
           tenant: {
             ...matched,
+            flat_number: normFlat,
             eb_number: matched.eb_number || preservedEb,
           },
           eb_number: preservedEb || matched.eb_number || '',
@@ -737,12 +828,18 @@ export async function getFlatsForProperty(
     // Include any tenants with custom flat names
     for (const t of tenants) {
       if (!assignedTenantIds.has(t.id)) {
-        const preservedEb = ebMap.get(t.flat_number.trim().toLowerCase()) || t.eb_number || '';
+        const normFlat = formatFlatNumber(t.flat_number);
+        const preservedEb =
+          ebMap.get(t.flat_number.trim().toLowerCase()) ||
+          ebMap.get(normFlat.toLowerCase()) ||
+          t.eb_number ||
+          '';
         flats.push({
-          flat_number: t.flat_number,
+          flat_number: normFlat,
           is_occupied: true,
           tenant: {
             ...t,
+            flat_number: normFlat,
             eb_number: t.eb_number || preservedEb,
           },
           eb_number: preservedEb,
@@ -762,10 +859,13 @@ export async function addOrUpdateTenant(input: TenantInput): Promise<number> {
   const now = new Date().toISOString();
   let tenantId = 0;
 
+  const cleanFlat = formatFlatNumber(input.flat_number);
+  const rawFlat = input.flat_number.trim();
+
   // Check if tenant exists for this flat
   const existing = await db.getFirstAsync<Tenant>(
-    'SELECT * FROM tenants WHERE property_id = ? AND flat_number = ? AND is_occupied = 1',
-    [input.property_id, input.flat_number.trim()]
+    'SELECT * FROM tenants WHERE property_id = ? AND (flat_number = ? OR flat_number = ?) AND is_occupied = 1',
+    [input.property_id, cleanFlat, rawFlat]
   );
 
   if (existing) {
@@ -824,7 +924,7 @@ export async function addOrUpdateTenant(input: TenantInput): Promise<number> {
       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)`,
       [
         input.property_id,
-        input.flat_number.trim(),
+        cleanFlat,
         input.name.trim(),
         input.phone_number.trim(),
         (input.occupation || '').trim(),
@@ -867,8 +967,8 @@ export async function addOrUpdateTenant(input: TenantInput): Promise<number> {
     const dueDateStr = formatDueDateForMonth(startMonthYear, dueDay);
 
     const existingPayments = await db.getAllAsync<PaymentRecord>(
-      'SELECT * FROM payments WHERE property_id = ? AND flat_number = ?',
-      [input.property_id, input.flat_number.trim()]
+      'SELECT * FROM payments WHERE property_id = ? AND (flat_number = ? OR flat_number = ?)',
+      [input.property_id, cleanFlat, rawFlat]
     );
 
     if (existingPayments.length === 0) {
@@ -877,7 +977,7 @@ export async function addOrUpdateTenant(input: TenantInput): Promise<number> {
          VALUES (?, ?, ?, ?, ?, ?, 0, '', ?, '', 'Pending', ?, ?)`,
         [
           input.property_id,
-          input.flat_number.trim(),
+          cleanFlat,
           tenantId,
           startMonthYear,
           rentAmount,
@@ -927,32 +1027,33 @@ export async function removeTenantFromFlat(
 ): Promise<void> {
   const db = await getDatabase();
   const cleanFlat = flatNumber.trim();
+  const normFlat = formatFlatNumber(cleanFlat);
 
   // Preserve the existing EB number before removing tenant so it is never lost on vacate
   try {
     const currentTenant = await db.getFirstAsync<{ eb_number: string }>(
-      'SELECT eb_number FROM tenants WHERE property_id = ? AND flat_number = ?',
-      [propertyId, cleanFlat]
+      'SELECT eb_number FROM tenants WHERE property_id = ? AND (flat_number = ? OR flat_number = ?)',
+      [propertyId, cleanFlat, normFlat]
     );
     if (currentTenant && currentTenant.eb_number && currentTenant.eb_number.trim()) {
-      await saveFlatEbNumber(propertyId, cleanFlat, currentTenant.eb_number.trim());
+      await saveFlatEbNumber(propertyId, normFlat, currentTenant.eb_number.trim());
     }
   } catch (ebErr) {
     console.warn('[SQLite] Error preserving EB number on vacate:', ebErr);
   }
 
   await db.runAsync(
-    'DELETE FROM tenants WHERE property_id = ? AND flat_number = ?',
-    [propertyId, cleanFlat]
+    'DELETE FROM tenants WHERE property_id = ? AND (flat_number = ? OR flat_number = ?)',
+    [propertyId, cleanFlat, normFlat]
   );
   // Clear payment history for this flat so the next tenant starts completely fresh
   await db.runAsync(
-    'DELETE FROM payments WHERE property_id = ? AND flat_number = ?',
-    [propertyId, cleanFlat]
+    'DELETE FROM payments WHERE property_id = ? AND (flat_number = ? OR flat_number = ?)',
+    [propertyId, cleanFlat, normFlat]
   );
   await db.runAsync(
-    'DELETE FROM payment_transactions WHERE property_id = ? AND flat_number = ?',
-    [propertyId, cleanFlat]
+    'DELETE FROM payment_transactions WHERE property_id = ? AND (flat_number = ? OR flat_number = ?)',
+    [propertyId, cleanFlat, normFlat]
   );
   notifyChange();
 }
@@ -1219,7 +1320,8 @@ export async function getPaymentsForFlat(
   rentStartDate?: string
 ): Promise<PaymentRecord[]> {
   const numPropId = Number(propertyId) || 0;
-  const cleanFlatNumber = String(flatNumber || '').trim();
+  const rawFlatNumber = String(flatNumber || '').trim();
+  const cleanFlatNumber = formatFlatNumber(rawFlatNumber) || rawFlatNumber;
 
   if (!numPropId || !cleanFlatNumber) {
     return [];
@@ -1231,16 +1333,16 @@ export async function getPaymentsForFlat(
 
     // Look up active tenant for this flat
     const tenant = await db.getFirstAsync<Tenant>(
-      'SELECT * FROM tenants WHERE property_id = ? AND flat_number = ? AND is_occupied = 1',
-      [numPropId, cleanFlatNumber]
+      'SELECT * FROM tenants WHERE property_id = ? AND (flat_number = ? OR flat_number = ?) AND is_occupied = 1',
+      [numPropId, cleanFlatNumber, rawFlatNumber]
     );
     const effectiveRent = Number(tenant?.rent_amount || defaultRentAmount) || 5000;
     const effectiveDueDay = Number(tenant?.due_day || dueDay) || 5;
     const effectiveStartDate = String(tenant?.rent_start_date || rentStartDate || '');
 
     let records = await db.getAllAsync<PaymentRecord>(
-      'SELECT * FROM payments WHERE property_id = ? AND flat_number = ? ORDER BY id DESC',
-      [numPropId, cleanFlatNumber]
+      'SELECT * FROM payments WHERE property_id = ? AND (flat_number = ? OR flat_number = ?) ORDER BY id DESC',
+      [numPropId, cleanFlatNumber, rawFlatNumber]
     );
 
     // If no payment history exists yet, generate a single initial month record from rent_start_date
@@ -1453,13 +1555,14 @@ export async function markPaymentAsPaid(
 ): Promise<PaymentDistributionResult> {
   const db = await getDatabase();
   const now = new Date().toISOString();
-  const cleanFlatNumber = flatNumber.trim();
+  const rawFlatNumber = flatNumber.trim();
+  const cleanFlatNumber = formatFlatNumber(rawFlatNumber) || rawFlatNumber;
   const cleanTargetMonth = monthYear.trim();
 
   // Find tenant info for rent_amount and due_day
   const tenant = await db.getFirstAsync<Tenant>(
-    'SELECT * FROM tenants WHERE property_id = ? AND flat_number = ? AND is_occupied = 1',
-    [propertyId, cleanFlatNumber]
+    'SELECT * FROM tenants WHERE property_id = ? AND (flat_number = ? OR flat_number = ?) AND is_occupied = 1',
+    [propertyId, cleanFlatNumber, rawFlatNumber]
   );
   const tenantRent = Number(tenant?.rent_amount || expectedTotalRent) || 5000;
   const dueDay = Number(tenant?.due_day || 5) || 5;
@@ -1467,8 +1570,8 @@ export async function markPaymentAsPaid(
 
   // Retrieve existing payment records for this flat
   const existingRecords = await db.getAllAsync<PaymentRecord>(
-    'SELECT * FROM payments WHERE property_id = ? AND flat_number = ?',
-    [propertyId, cleanFlatNumber]
+    'SELECT * FROM payments WHERE property_id = ? AND (flat_number = ? OR flat_number = ?)',
+    [propertyId, cleanFlatNumber, rawFlatNumber]
   );
 
   // Find all unpaid or partially paid records, sorted chronologically
@@ -1972,13 +2075,13 @@ export async function getRentReportForProperty(
     const currentMonth = now.getMonth();
 
     const rows: RentReportTenantRow[] = tenants.map((t) => {
-      const rawNum = t.flat_number.replace(/^(flat|flats)\s*[-:]?\s*/i, '').trim();
-      const displayFlat = rawNum ? `Flat ${rawNum}` : t.flat_number;
+      const displayFlat = formatFlatNumber(t.flat_number);
 
       // Filter payments belonging to this tenant
       const tenantPayments = allPayments.filter(
         (p) =>
           p.tenant_id === t.id ||
+          formatFlatNumber(p.flat_number).toLowerCase() === displayFlat.toLowerCase() ||
           p.flat_number.trim().toLowerCase() === t.flat_number.trim().toLowerCase()
       );
 

@@ -35,6 +35,7 @@ import {
   parseDateSafe,
   isRentDue,
   computeNextStartDate,
+  formatFlatNumber,
 } from '../db/database';
 import { Colors } from '../theme/colors';
 import AppDatePicker from '../components/AppDatePicker';
@@ -225,9 +226,8 @@ export default function TenantViewScreen({
   // Compute Next Start Date string dynamically (e.g. 01 Oct 2026)
   const nextStartDate = computeNextStartDate(tenant?.rent_start_date, tenant?.due_day, payments);
 
-  // Header Title format: "Flat - {flatNumber}, {tenantShortName}"
-  const rawNum = flat.flat_number.replace(/^(flat|flats)\s*[-:]?\s*/i, '').trim();
-  const flatDisplay = rawNum ? `Flat - ${rawNum}` : flat.flat_number;
+  // Header Title format: "{flatDisplay}, {tenantShortName}"
+  const flatDisplay = formatFlatNumber(flat.flat_number);
   const tenantShortName = tenant?.name ? tenant.name.split(' ')[0] : 'Tenant';
   const headerTitle = `${flatDisplay}, ${tenantShortName}`;
 

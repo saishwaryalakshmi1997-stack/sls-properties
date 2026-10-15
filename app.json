@@ -1,6 +1,6 @@
 {
   "expo": {
-    "name": "SLS Properties",
+    "name": "SRM Properties",
     "slug": "sls-properties",
     "version": "1.0.0",
     "orientation": "default",
@@ -40,7 +40,7 @@
       [
         "expo-contacts",
         {
-          "contactsPermission": "Allow SLS Properties to access your contacts to select tenant phone numbers."
+          "contactsPermission": "Allow SRM Properties to access your contacts to select tenant phone numbers."
         }
       ],
       [

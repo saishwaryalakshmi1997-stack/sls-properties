@@ -30,6 +30,7 @@ import {
   getPropertiesWithCounts,
   getRentReportForProperty,
   getAllBuildingsRentReport,
+  formatFlatNumber,
 } from '../db/database';
 import { syncAll } from '../db/sync';
 import { Colors } from '../theme/colors';
@@ -131,8 +132,8 @@ function buildReportHtml(
         let dateText = '';
 
         if (status === 'paid') {
-          paid = monthData?.record?.paid_amount ?? totalAmount;
-          cellText = paid > 0 && paid !== rent ? `₹${paid.toLocaleString('en-IN')}` : 'Paid';
+          paid = monthData?.record?.paid_amount ?? (totalAmount > 0 ? totalAmount : rent);
+          cellText = `₹${paid.toLocaleString('en-IN')}`;
           cellClass = 'cell-paid';
           dateText = getMonthPaymentDate(monthData);
         } else if (status === 'not_paid') {
@@ -142,7 +143,7 @@ function buildReportHtml(
         } else if (status === 'partial') {
           paid = monthData?.record?.paid_amount ?? 0;
           due = Math.max(0, totalAmount - paid);
-          cellText = paid > 0 ? `₹${paid.toLocaleString('en-IN')}` : 'Part';
+          cellText = `₹${paid.toLocaleString('en-IN')}`;
           cellClass = 'cell-partial';
           dateText = getMonthPaymentDate(monthData);
         }
@@ -468,7 +469,7 @@ function buildReportHtml(
 
   <div class="footer">
     <span>Confidential • ${property.building_name} Annual Rent Statement</span>
-    <span>Generated via SLS Rent App</span>
+    <span>Generated via SRM Properties App</span>
   </div>
 </body>
 </html>
@@ -539,8 +540,8 @@ function buildConsolidatedReportHtml(
                 let dateText = '';
 
                 if (status === 'paid') {
-                  paid = monthData?.record?.paid_amount ?? totalAmount;
-                  cellText = paid > 0 && paid !== rent ? `₹${paid.toLocaleString('en-IN')}` : 'Paid';
+                  paid = monthData?.record?.paid_amount ?? (totalAmount > 0 ? totalAmount : rent);
+                  cellText = `₹${paid.toLocaleString('en-IN')}`;
                   cellClass = 'cell-paid';
                   dateText = getMonthPaymentDate(monthData);
                 } else if (status === 'not_paid') {
@@ -550,7 +551,7 @@ function buildConsolidatedReportHtml(
                 } else if (status === 'partial') {
                   paid = monthData?.record?.paid_amount ?? 0;
                   due = Math.max(0, totalAmount - paid);
-                  cellText = paid > 0 ? `₹${paid.toLocaleString('en-IN')}` : 'Part';
+                  cellText = `₹${paid.toLocaleString('en-IN')}`;
                   cellClass = 'cell-partial';
                   dateText = getMonthPaymentDate(monthData);
                 }
@@ -629,7 +630,7 @@ function buildConsolidatedReportHtml(
 <html>
 <head>
   <meta charset="utf-8">
-  <title>SLS Properties - All Buildings Rent Report (${year})</title>
+  <title>SRM Properties - All Buildings Rent Report (${year})</title>
   <style>
     @page {
       size: A4 landscape;
@@ -958,7 +959,7 @@ function buildConsolidatedReportHtml(
 <body>
   <div class="header-box">
     <div>
-      <h1 class="brand-title">SLS Properties — Portfolio Consolidated Rent Report (${year})</h1>
+      <h1 class="brand-title">SRM Properties — Portfolio Consolidated Rent Report (${year})</h1>
       <p class="sub-line">Generated on ${generatedDate} • Complete Multi-Property Annual Statement</p>
     </div>
     <div class="summary-strip">
@@ -1041,8 +1042,8 @@ function buildConsolidatedReportHtml(
   </div>
 
   <div class="footer">
-    <span>Confidential • SLS Properties Complete Portfolio Rent Statement (${year})</span>
-    <span>Generated via SLS Rent App</span>
+    <span>Confidential • SRM Properties Complete Portfolio Rent Statement (${year})</span>
+    <span>Generated via SRM Rent App</span>
   </div>
 </body>
 </html>
@@ -1193,20 +1194,14 @@ export default function RentReportScreen() {
       setDownloadedFileName(fileName);
       setDownloadedFileUri(finalFileUri);
 
-      // 3. Show toast with "View" action button (opens the in-app document viewer directly)
+      // 3. Show toast notification without View button
       Toast.show({
         type: 'success',
         title: 'PDF Downloaded',
         message: savedToDocuments
           ? `Saved to Documents: ${fileName}`
           : fileName,
-        duration: 9000,
-        action: {
-          label: 'View',
-          onPress: () => {
-            setIsPdfViewerOpen(true);
-          },
-        },
+        duration: 4000,
       });
     } catch (err: any) {
       console.error('[RentReport] PDF Export error:', err);
@@ -1291,13 +1286,7 @@ export default function RentReportScreen() {
         message: savedToDocuments
           ? `Saved to Documents: ${fileName}`
           : fileName,
-        duration: 9000,
-        action: {
-          label: 'View',
-          onPress: () => {
-            setIsPdfViewerOpen(true);
-          },
-        },
+        duration: 4000,
       });
     } catch (err: any) {
       console.error('[RentReport] All Buildings PDF Export error:', err);
@@ -1439,11 +1428,13 @@ export default function RentReportScreen() {
       }
 
       return () => {
-        // When leaving the screen / navigating to another tab, always restore portrait orientation
-        ScreenOrientation.lockAsync(ScreenOrientation.OrientationLock.PORTRAIT_UP).catch(() => { });
-        navigation.setOptions({
-          tabBarStyle: undefined,
-        });
+        // Only restore portrait orientation if not currently viewing a report table
+        if (!selectedProperty && !isAllBuildings) {
+          ScreenOrientation.lockAsync(ScreenOrientation.OrientationLock.PORTRAIT_UP).catch(() => { });
+          navigation.setOptions({
+            tabBarStyle: undefined,
+          });
+        }
       };
     }, [selectedProperty, isAllBuildings, navigation])
   );
@@ -1474,6 +1465,15 @@ export default function RentReportScreen() {
     return () => backHandler.remove();
   }, [selectedProperty, isAllBuildings, handleBackToBuildings]);
 
+  // Reset to Rent Report front screen whenever reports tab in bottom bar is tapped
+  useEffect(() => {
+    const unsubscribe = navigation.addListener('tabPress', () => {
+      setIsPdfViewerOpen(false);
+      handleBackToBuildings();
+    });
+    return unsubscribe;
+  }, [navigation, handleBackToBuildings]);
+
   const handleRefresh = () => {
     setRefreshing(true);
     syncAll()
@@ -1497,30 +1497,56 @@ export default function RentReportScreen() {
     setSelectedYear((prev) => prev + 1);
   };
 
-  // Render individual month status cell
-  const renderStatusCell = (status: RentReportMonthStatus) => {
+  // Render individual month status cell with actual amount paid and date
+  const renderStatusCell = (monthData?: RentReportMonthData, defaultRent: number = 0) => {
+    const status = monthData?.status || 'upcoming';
+    const rent = defaultRent || 0;
+    const totalAmount = monthData?.record?.total_amount ?? monthData?.record?.amount ?? rent;
+    const paid = monthData?.record?.paid_amount ?? (status === 'paid' ? totalAmount : 0);
+    const payDate = getMonthPaymentDate(monthData);
+
     switch (status) {
-      case 'paid':
+      case 'paid': {
+        const displayAmt = paid > 0 ? paid : (totalAmount > 0 ? totalAmount : rent);
         return (
-          <MaterialCommunityIcons
-            name="check"
-            size={18}
-            color="#16A34A"
-          />
+          <View style={styles.statusCellContainer}>
+            <Text style={styles.cellPaidAmountText}>
+              ₹{displayAmt.toLocaleString('en-IN')}
+            </Text>
+            {!!payDate && (
+              <Text style={styles.cellPaidDateText} numberOfLines={1}>
+                {payDate}
+              </Text>
+            )}
+          </View>
+        );
+      }
+      case 'partial':
+        return (
+          <View style={styles.statusCellContainer}>
+            <Text style={styles.cellPartAmountText}>
+              ₹{paid.toLocaleString('en-IN')}
+            </Text>
+            {!!payDate && (
+              <Text style={styles.cellPartDateText} numberOfLines={1}>
+                {payDate}
+              </Text>
+            )}
+          </View>
         );
       case 'not_paid':
         return (
-          <MaterialCommunityIcons
-            name="close"
-            size={16}
-            color="#DC2626"
-          />
+          <View style={styles.statusCellContainer}>
+            <Text style={styles.cellDueText}>Due</Text>
+          </View>
         );
-      case 'partial':
-        return <Text style={styles.partialText}>Part</Text>;
       case 'upcoming':
       default:
-        return <Text style={styles.upcomingText}>—</Text>;
+        return (
+          <View style={styles.statusCellContainer}>
+            <Text style={styles.upcomingText}>—</Text>
+          </View>
+        );
     }
   };
 
@@ -1548,30 +1574,76 @@ export default function RentReportScreen() {
           },
         ]}
       >
-        {/* Top Back Navigation & Action Bar */}
+        {/* Top Header Bar: Back Icon, Title & Building Name, Year Selector & View PDF */}
         <View style={styles.reportNavRow}>
-          <TouchableOpacity
-            style={styles.backButton}
-            onPress={handleBackToBuildings}
-            activeOpacity={0.7}
-          >
-            <MaterialCommunityIcons name="arrow-left" size={18} color="#334155" />
-            <Text style={styles.backButtonText}>Buildings</Text>
-          </TouchableOpacity>
+          <View style={styles.navLeftBlock}>
+            <TouchableOpacity
+              style={styles.backIconButton}
+              onPress={handleBackToBuildings}
+              activeOpacity={0.7}
+              hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+              accessibilityLabel="Back to Buildings"
+            >
+              <MaterialCommunityIcons name="arrow-left" size={20} color="#1E293B" />
+            </TouchableOpacity>
 
-          <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
-            {isPortfolio && (
-              <View style={styles.portfolioBadge}>
-                <MaterialCommunityIcons name="office-building" size={13} color="#701A24" />
-                <Text style={styles.portfolioBadgeText}>
-                  All Buildings ({properties.length})
-                </Text>
-              </View>
-            )}
-            <View style={styles.landscapeBadge}>
-              <MaterialCommunityIcons name="screen-rotation" size={14} color="#15803D" />
-              <Text style={styles.landscapeBadgeText}>Landscape</Text>
+            <View style={styles.navTitleContainer}>
+              <Text style={styles.navMainTitle} numberOfLines={1}>
+                {isPortfolio ? 'All Buildings Rent Report' : 'Rent Report'}
+              </Text>
+              <Text style={styles.navSubTitle} numberOfLines={1}>
+                {isPortfolio
+                  ? `Portfolio (${properties.length} Properties)`
+                  : (selectedProperty?.building_name || 'Property')}
+              </Text>
             </View>
+          </View>
+
+          <View style={styles.navRightBlock}>
+            {/* Year Selector */}
+            <View style={styles.yearSelectorPill}>
+              <TouchableOpacity
+                onPress={handlePrevYear}
+                style={styles.yearArrowBtn}
+                hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+              >
+                <MaterialCommunityIcons name="chevron-left" size={18} color="#334155" />
+              </TouchableOpacity>
+
+              <Text style={styles.yearText}>{selectedYear}</Text>
+
+              <TouchableOpacity
+                onPress={handleNextYear}
+                style={styles.yearArrowBtn}
+                hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+              >
+                <MaterialCommunityIcons name="chevron-right" size={18} color="#334155" />
+              </TouchableOpacity>
+            </View>
+
+            {/* View PDF / Preview Screen button (Single Property or All Buildings) */}
+            <TouchableOpacity
+              style={styles.cardPreviewBtn}
+              onPress={() => {
+                if (isPortfolio) {
+                  navigation.navigate('ReportPreview', {
+                    isAllBuildings: true,
+                    year: selectedYear,
+                  });
+                } else if (selectedProperty) {
+                  navigation.navigate('ReportPreview', {
+                    propertyId: selectedProperty.id,
+                    year: selectedYear,
+                  });
+                }
+              }}
+              hitSlop={{ top: 6, bottom: 6, left: 6, right: 6 }}
+              activeOpacity={0.8}
+              accessibilityLabel="View PDF Preview"
+            >
+              <MaterialCommunityIcons name="file-eye-outline" size={16} color={Colors.primary} />
+              <Text style={styles.cardPreviewBtnText}>View PDF</Text>
+            </TouchableOpacity>
           </View>
         </View>
 
@@ -1589,71 +1661,6 @@ export default function RentReportScreen() {
         >
           {/* Main Clean Light Card Container */}
           <View style={styles.reportCard}>
-            {/* Header section with integrated Year Selector */}
-            <View style={styles.cardHeader}>
-              <View style={styles.cardHeaderTitles}>
-                <Text style={styles.cardMainTitle}>
-                  {isPortfolio ? 'All Buildings Rent Report' : 'Rent Report'}
-                </Text>
-                <Text style={styles.cardSubTitle} numberOfLines={1}>
-                  {isPortfolio
-                    ? `Portfolio Statement (${properties.length} Properties) • ${selectedYear}`
-                    : (selectedProperty?.building_name || 'Property')}
-                </Text>
-              </View>
-
-              <View style={styles.cardHeaderRight}>
-                {/* Year Selector */}
-                <View style={styles.yearSelectorPill}>
-                  <TouchableOpacity
-                    onPress={handlePrevYear}
-                    style={styles.yearArrowBtn}
-                    hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
-                  >
-                    <MaterialCommunityIcons name="chevron-left" size={20} color="#334155" />
-                  </TouchableOpacity>
-
-                  <Text style={styles.yearText}>{selectedYear}</Text>
-
-                  <TouchableOpacity
-                    onPress={handleNextYear}
-                    style={styles.yearArrowBtn}
-                    hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
-                  >
-                    <MaterialCommunityIcons name="chevron-right" size={20} color="#334155" />
-                  </TouchableOpacity>
-                </View>
-
-                {/* PDF quick action button in header */}
-                <TouchableOpacity
-                  style={[styles.cardPdfBtn, isExportingPdf && { opacity: 0.7 }]}
-                  onPress={isPortfolio ? handleDownloadAllBuildingsPdf : handleDownloadPdf}
-                  disabled={
-                    isExportingPdf ||
-                    (isPortfolio
-                      ? !consolidatedReport || consolidatedReport.buildings.length === 0
-                      : !reportData || reportData.rows.length === 0)
-                  }
-                  hitSlop={{ top: 6, bottom: 6, left: 6, right: 6 }}
-                  activeOpacity={0.8}
-                >
-                  {isExportingPdf ? (
-                    <ActivityIndicator size="small" color={Colors.primary} />
-                  ) : (
-                    <MaterialCommunityIcons name="file-pdf-box" size={20} color={Colors.primary} />
-                  )}
-                </TouchableOpacity>
-
-                <TouchableOpacity
-                  style={styles.cardCloseBtn}
-                  onPress={handleBackToBuildings}
-                  hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
-                >
-                  <MaterialCommunityIcons name="close" size={18} color="#64748B" />
-                </TouchableOpacity>
-              </View>
-            </View>
-
             {/* KPI Metric Strip for Portfolio Mode */}
             {isPortfolio && consolidatedReport && (
               <View style={styles.kpiStripRow}>
@@ -1912,9 +1919,16 @@ export default function RentReportScreen() {
                                       return (
                                         <View
                                           key={`cell-${row.tenant.id}-${mIdx}`}
-                                          style={[styles.dataCell, styles.monthCell, { width: MONTH_COL_WIDTH }]}
+                                          style={[
+                                            styles.dataCell,
+                                            styles.monthCell,
+                                            { width: MONTH_COL_WIDTH },
+                                            status === 'paid' && styles.monthCellPaid,
+                                            status === 'partial' && styles.monthCellPartial,
+                                            status === 'not_paid' && styles.monthCellDue,
+                                          ]}
                                         >
-                                          {renderStatusCell(status)}
+                                          {renderStatusCell(monthData, rent)}
                                         </View>
                                       );
                                     })}
@@ -2134,9 +2148,16 @@ export default function RentReportScreen() {
                                 return (
                                   <View
                                     key={`cell-${row.tenant.id}-${mIdx}`}
-                                    style={[styles.dataCell, styles.monthCell, { width: MONTH_COL_WIDTH }]}
+                                    style={[
+                                      styles.dataCell,
+                                      styles.monthCell,
+                                      { width: MONTH_COL_WIDTH },
+                                      status === 'paid' && styles.monthCellPaid,
+                                      status === 'partial' && styles.monthCellPartial,
+                                      status === 'not_paid' && styles.monthCellDue,
+                                    ]}
                                   >
-                                    {renderStatusCell(status)}
+                                    {renderStatusCell(monthData, rent)}
                                   </View>
                                 );
                               })}
@@ -2183,13 +2204,13 @@ export default function RentReportScreen() {
                   {/* Table Footer Legend */}
                   <View style={styles.legendContainer}>
                     <View style={styles.legendItem}>
-                      <MaterialCommunityIcons name="check" size={16} color="#16A34A" />
+                      <Text style={[styles.cellPaidAmountText, { fontSize: 11 }]}>₹ Amt</Text>
                       <Text style={styles.legendText}>Paid</Text>
                     </View>
 
                     <View style={styles.legendItem}>
-                      <MaterialCommunityIcons name="close" size={14} color="#DC2626" />
-                      <Text style={styles.legendText}>Not paid</Text>
+                      <Text style={[styles.cellDueText, { fontSize: 11 }]}>Due</Text>
+                      <Text style={styles.legendText}>Unpaid</Text>
                     </View>
 
                     <View style={styles.legendItem}>
@@ -2198,7 +2219,7 @@ export default function RentReportScreen() {
                     </View>
 
                     <View style={styles.legendItem}>
-                      <Text style={styles.partialLegendSymbol}>Part</Text>
+                      <Text style={[styles.cellPartAmountText, { fontSize: 11 }]}>₹ Part</Text>
                       <Text style={styles.legendText}>Partial</Text>
                     </View>
                   </View>
@@ -2236,8 +2257,8 @@ export default function RentReportScreen() {
                 </Text>
                 <Text style={styles.viewerSubtitle}>
                   {isPortfolio
-                    ? `A4 Landscape Document • Consolidated Portfolio (${properties.length} Properties)`
-                    : 'A4 Landscape Document • Saved to Documents'}
+                    ? `Consolidated Portfolio (${properties.length} Properties)`
+                    : 'Saved to Documents'}
                 </Text>
               </View>
 
@@ -2313,7 +2334,7 @@ export default function RentReportScreen() {
                       {/* Sheet Header */}
                       <View style={styles.sheetHeader}>
                         <View style={styles.sheetHeaderLeft}>
-                          <Text style={styles.sheetBrandTitle}>SLS PROPERTIES</Text>
+                          <Text style={styles.sheetBrandTitle}>SRM PROPERTIES</Text>
                           <Text style={styles.sheetDocTitle}>
                             ALL BUILDINGS CONSOLIDATED RENT REPORT ({selectedYear})
                           </Text>
@@ -2433,7 +2454,7 @@ export default function RentReportScreen() {
                                     ]}
                                   >
                                     <Text style={[styles.sheetTd, { width: 60, fontWeight: '700' }]}>
-                                      {row.tenant.flat_number || '—'}
+                                      {formatFlatNumber(row.tenant.flat_number) || row.displayFlat || '—'}
                                     </Text>
                                     <Text style={[styles.sheetTd, { width: 120, fontWeight: '600' }]} numberOfLines={1}>
                                       {row.tenant.name}
@@ -2447,17 +2468,19 @@ export default function RentReportScreen() {
                                         <View key={mIdx} style={[styles.sheetTd, styles.sheetTdMonth, { width: 52 }]}>
                                           {status === 'paid' ? (
                                             <View style={styles.sheetChipPaid}>
-                                              <Text style={styles.sheetChipPaidText}>✓ Paid</Text>
+                                              <Text style={styles.sheetChipPaidText}>
+                                                ₹{(mData?.record?.paid_amount ?? (totalAmount > 0 ? totalAmount : rent)).toLocaleString('en-IN')}
+                                              </Text>
                                               {payDate ? <Text style={styles.sheetChipPaidDate}>{payDate}</Text> : null}
                                             </View>
                                           ) : status === 'not_paid' ? (
                                             <View style={styles.sheetChipDue}>
-                                              <Text style={styles.sheetChipDueText}>✕ Due</Text>
+                                              <Text style={styles.sheetChipDueText}>Due</Text>
                                             </View>
                                           ) : status === 'partial' ? (
                                             <View style={styles.sheetChipPart}>
                                               <Text style={styles.sheetChipPartText}>
-                                                {pAmt > 0 ? `₹${pAmt.toLocaleString('en-IN')}` : 'Part'}
+                                                ₹{pAmt.toLocaleString('en-IN')}
                                               </Text>
                                               {payDate ? <Text style={styles.sheetChipPartDate}>{payDate}</Text> : null}
                                             </View>
@@ -2535,7 +2558,7 @@ export default function RentReportScreen() {
                       {/* Sheet Header */}
                       <View style={styles.sheetHeader}>
                         <View style={styles.sheetHeaderLeft}>
-                          <Text style={styles.sheetBrandTitle}>SLS PROPERTIES</Text>
+                          <Text style={styles.sheetBrandTitle}>SRM PROPERTIES</Text>
                           <Text style={styles.sheetDocTitle}>
                             RENT REPORT — {(selectedProperty.building_name || '').toUpperCase()} ({selectedYear})
                           </Text>
@@ -2622,7 +2645,7 @@ export default function RentReportScreen() {
                               ]}
                             >
                               <Text style={[styles.sheetTd, { width: 60, fontWeight: '700' }]}>
-                                {row.tenant.flat_number || '—'}
+                                {formatFlatNumber(row.tenant.flat_number) || row.displayFlat || '—'}
                               </Text>
                               <Text style={[styles.sheetTd, { width: 120, fontWeight: '600' }]} numberOfLines={1}>
                                 {row.tenant.name}
@@ -2636,17 +2659,19 @@ export default function RentReportScreen() {
                                   <View key={mIdx} style={[styles.sheetTd, styles.sheetTdMonth, { width: 52 }]}>
                                     {status === 'paid' ? (
                                       <View style={styles.sheetChipPaid}>
-                                        <Text style={styles.sheetChipPaidText}>✓ Paid</Text>
+                                        <Text style={styles.sheetChipPaidText}>
+                                          ₹{(mData?.record?.paid_amount ?? (totalAmount > 0 ? totalAmount : rent)).toLocaleString('en-IN')}
+                                        </Text>
                                         {payDate ? <Text style={styles.sheetChipPaidDate}>{payDate}</Text> : null}
                                       </View>
                                     ) : status === 'not_paid' ? (
                                       <View style={styles.sheetChipDue}>
-                                        <Text style={styles.sheetChipDueText}>✕ Due</Text>
+                                        <Text style={styles.sheetChipDueText}>Due</Text>
                                       </View>
                                     ) : status === 'partial' ? (
                                       <View style={styles.sheetChipPart}>
                                         <Text style={styles.sheetChipPartText}>
-                                          {pAmt > 0 ? `₹${pAmt.toLocaleString('en-IN')}` : 'Part'}
+                                          ₹{pAmt.toLocaleString('en-IN')}
                                         </Text>
                                         {payDate ? <Text style={styles.sheetChipPartDate}>{payDate}</Text> : null}
                                       </View>
@@ -2711,7 +2736,7 @@ export default function RentReportScreen() {
 
                   <View style={styles.sheetFooterNote}>
                     <Text style={styles.sheetFooterNoteText}>
-                      Confidential • Official Statement generated by SLS Rent Management • Saved in Documents
+                      Confidential • Official Statement generated by SRM Rent Management • Saved in Documents
                     </Text>
                   </View>
                 </View>
@@ -2795,7 +2820,13 @@ export default function RentReportScreen() {
             ) : (
               <View style={styles.buildingsGrid}>
                 {/* All Buildings Consolidated Report Hero Card */}
-                <View style={styles.consolidatedHeroCard}>
+                <TouchableOpacity
+                  style={styles.consolidatedHeroCard}
+                  onPress={() => {
+                    setIsAllBuildings(true);
+                  }}
+                  activeOpacity={0.8}
+                >
                   <View style={styles.consolidatedTopRow}>
                     <View style={styles.consolidatedIconCircle}>
                       <MaterialCommunityIcons name="file-document-multiple" size={24} color="#FFFFFF" />
@@ -2803,23 +2834,6 @@ export default function RentReportScreen() {
                     <View style={styles.consolidatedTexts}>
                       <View style={styles.consolidatedTitleRow}>
                         <Text style={styles.consolidatedTitle}>All Buildings Report</Text>
-                        {/* <View style={styles.consolidatedYearPill}>
-                          <TouchableOpacity
-                            onPress={handlePrevYear}
-                            style={styles.heroYearArrowBtn}
-                            hitSlop={{ top: 6, bottom: 6, left: 6, right: 6 }}
-                          >
-                            <MaterialCommunityIcons name="chevron-left" size={16} color="#701A24" />
-                          </TouchableOpacity>
-                          <Text style={styles.consolidatedYearText}>{selectedYear}</Text>
-                          <TouchableOpacity
-                            onPress={handleNextYear}
-                            style={styles.heroYearArrowBtn}
-                            hitSlop={{ top: 6, bottom: 6, left: 6, right: 6 }}
-                          >
-                            <MaterialCommunityIcons name="chevron-right" size={16} color="#701A24" />
-                          </TouchableOpacity>
-                        </View> */}
                       </View>
 
                       <View style={styles.consolidatedStatsRow}>
@@ -2841,35 +2855,11 @@ export default function RentReportScreen() {
                         </View>
                       </View>
                     </View>
+                    <View style={styles.consolidatedArrowWrapper}>
+                      <MaterialCommunityIcons name="chevron-right" size={22} color="#701A24" />
+                    </View>
                   </View>
-
-                  <View style={styles.consolidatedActionsRow}>
-                    <TouchableOpacity
-                      style={styles.consolidatedViewBtn}
-                      onPress={() => {
-                        setIsAllBuildings(true);
-                      }}
-                      activeOpacity={0.85}
-                    >
-                      <MaterialCommunityIcons name="table-large" size={16} color="#FFFFFF" />
-                      <Text style={styles.consolidatedViewBtnText}>View All Buildings</Text>
-                    </TouchableOpacity>
-
-                    <TouchableOpacity
-                      style={[styles.consolidatedDownloadBtn, isExportingPdf && { opacity: 0.7 }]}
-                      onPress={handleDownloadAllBuildingsPdf}
-                      disabled={isExportingPdf}
-                      activeOpacity={0.85}
-                    >
-                      {isExportingPdf ? (
-                        <ActivityIndicator size="small" color="#701A24" />
-                      ) : (
-                        <MaterialCommunityIcons name="file-pdf-box" size={18} color="#701A24" />
-                      )}
-                      <Text style={styles.consolidatedDownloadBtnText}>Download PDF</Text>
-                    </TouchableOpacity>
-                  </View>
-                </View>
+                </TouchableOpacity>
 
                 <Text style={styles.sectionHeading}>
                   Individual Buildings ({properties.length})
@@ -3164,143 +3154,85 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     justifyContent: 'space-between',
     alignItems: 'center',
-    paddingHorizontal: 8,
-    paddingBottom: 8,
+    paddingHorizontal: 6,
+    paddingVertical: 4,
+    marginBottom: 6,
     gap: 8,
   },
-  backButton: {
+  navLeftBlock: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 6,
-    paddingVertical: 6,
-    paddingHorizontal: 12,
+    gap: 8,
+    flexShrink: 1,
+  },
+  backIconButton: {
+    width: 34,
+    height: 34,
     borderRadius: 8,
     backgroundColor: '#FFFFFF',
     borderWidth: 1,
-    borderColor: '#E2E8F0',
+    borderColor: '#CBD5E1',
+    justifyContent: 'center',
+    alignItems: 'center',
     shadowColor: '#000000',
     shadowOffset: { width: 0, height: 1 },
     shadowOpacity: 0.05,
     shadowRadius: 2,
     elevation: 1,
   },
-  backButtonText: {
-    color: '#334155',
-    fontSize: 13,
+  navTitleContainer: {
+    justifyContent: 'center',
+    flexShrink: 1,
+  },
+  navMainTitle: {
+    fontSize: 15,
+    fontWeight: '800',
+    color: '#0F172A',
+    letterSpacing: -0.2,
+    lineHeight: 18,
+  },
+  navSubTitle: {
+    fontSize: 11.5,
     fontWeight: '600',
+    color: '#64748B',
+    lineHeight: 14,
   },
-  landscapeBadge: {
+  navRightBlock: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 6,
-    backgroundColor: '#DCFCE7',
-    paddingHorizontal: 10,
-    paddingVertical: 4,
-    borderRadius: 14,
-    borderWidth: 1,
-    borderColor: '#86EFAC',
-  },
-  landscapeBadgeText: {
-    color: '#15803D',
-    fontSize: 11,
-    fontWeight: '700',
-    letterSpacing: 0.4,
-    textTransform: 'uppercase',
-  },
-  downloadPdfBtn: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 6,
-    paddingVertical: 6,
-    paddingHorizontal: 14,
-    borderRadius: 8,
-    backgroundColor: Colors.primaryDark,
-    shadowColor: Colors.primaryDark,
-    shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.25,
-    shadowRadius: 4,
-    elevation: 2,
-  },
-  downloadPdfBtnText: {
-    color: '#FFFFFF',
-    fontSize: 13,
-    fontWeight: '700',
-  },
-  switchButton: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 6,
-    paddingVertical: 6,
-    paddingHorizontal: 12,
-    borderRadius: 8,
-    backgroundColor: '#FFFFFF',
-    borderWidth: 1,
-    borderColor: '#E2E8F0',
-    shadowColor: '#000000',
-    shadowOffset: { width: 0, height: 1 },
-    shadowOpacity: 0.05,
-    shadowRadius: 2,
-    elevation: 1,
-  },
-  switchButtonText: {
-    color: '#334155',
-    fontSize: 13,
-    fontWeight: '600',
+    gap: 8,
   },
   reportScrollContent: {
     paddingHorizontal: 4,
-    paddingTop: 2,
+    paddingTop: 0,
   },
   reportCard: {
     backgroundColor: '#FFFFFF',
-    borderRadius: 14,
+    borderRadius: 12,
     borderWidth: 1,
     borderColor: '#E2E8F0',
-    padding: 14,
+    padding: 10,
     shadowColor: '#000000',
     shadowOffset: { width: 0, height: 2 },
     shadowOpacity: 0.06,
     shadowRadius: 8,
     elevation: 2,
   },
-  cardHeader: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    marginBottom: 12,
-    gap: 12,
-  },
-  cardHeaderTitles: {
-    gap: 2,
-    flexShrink: 1,
-  },
-  cardMainTitle: {
-    fontSize: 18,
-    fontWeight: '800',
-    color: '#0F172A',
-    letterSpacing: -0.3,
-  },
-  cardSubTitle: {
-    fontSize: 13,
-    color: '#64748B',
-    fontWeight: '600',
-  },
-  cardHeaderRight: {
+  cardPreviewBtn: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 8,
-  },
-  cardPdfBtn: {
-    padding: 6,
+    gap: 4,
+    paddingHorizontal: 9,
+    paddingVertical: 5,
     borderRadius: 8,
     backgroundColor: Colors.primaryTint,
     borderWidth: 1,
-    borderColor: '#E2E8F0',
+    borderColor: '#FCE7EA',
   },
-  cardCloseBtn: {
-    padding: 6,
-    borderRadius: 8,
-    backgroundColor: '#F1F5F9',
+  cardPreviewBtnText: {
+    fontSize: 12,
+    fontWeight: '700',
+    color: Colors.primary,
   },
 
   // Year Selector Pill
@@ -3423,6 +3355,57 @@ const styles = StyleSheet.create({
   },
 
   // Cell Content Types
+  statusCellContainer: {
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingHorizontal: 1,
+  },
+  cellPaidAmountText: {
+    fontSize: 9,
+    fontWeight: '700',
+    color: '#166534',
+    lineHeight: 11,
+    textAlign: 'center',
+  },
+  cellPaidDateText: {
+    fontSize: 7,
+    fontWeight: '600',
+    color: '#15803D',
+    lineHeight: 9,
+    marginTop: 1,
+    textAlign: 'center',
+  },
+  cellPartAmountText: {
+    fontSize: 8.5,
+    fontWeight: '700',
+    color: '#92400E',
+    lineHeight: 10,
+    textAlign: 'center',
+  },
+  cellPartDateText: {
+    fontSize: 7,
+    fontWeight: '600',
+    color: '#B45309',
+    lineHeight: 9,
+    marginTop: 1,
+    textAlign: 'center',
+  },
+  cellDueText: {
+    fontSize: 9.5,
+    fontWeight: '700',
+    color: '#DC2626',
+    lineHeight: 12,
+    textAlign: 'center',
+  },
+  monthCellPaid: {
+    backgroundColor: '#DCFCE7',
+  },
+  monthCellPartial: {
+    backgroundColor: '#FEF3C7',
+  },
+  monthCellDue: {
+    backgroundColor: '#FEE2E2',
+  },
   partialText: {
     fontSize: 11,
     fontWeight: '800',
@@ -4073,8 +4056,12 @@ const styles = StyleSheet.create({
   },
   consolidatedTopRow: {
     flexDirection: 'row',
-    alignItems: 'flex-start',
+    alignItems: 'center',
     gap: 12,
+  },
+  consolidatedArrowWrapper: {
+    justifyContent: 'center',
+    alignItems: 'center',
   },
   consolidatedIconCircle: {
     width: 44,

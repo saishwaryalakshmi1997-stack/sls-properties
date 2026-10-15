@@ -96,6 +96,17 @@ export default function DashboardScreen() {
     return () => backSub.remove();
   }, [selectedProperty, navigation]);
 
+  // Reset to Dashboard front screen whenever the Dashboard tab is tapped
+  useEffect(() => {
+    const unsubscribe = navigation.addListener('tabPress', () => {
+      setSelectedProperty(null);
+      if (route.params?.propertyId) {
+        navigation.setParams({ propertyId: undefined });
+      }
+    });
+    return unsubscribe;
+  }, [navigation, route.params?.propertyId]);
+
   useFocusEffect(
     useCallback(() => {
       // Ensure Dashboard is always portrait
@@ -142,7 +153,7 @@ export default function DashboardScreen() {
         <View style={styles.headerTopRow}>
           <View style={styles.headerTitleArea}>
             <Text style={styles.title}>Dashboard</Text>
-            <Text style={styles.subtitle}>SLS Properties</Text>
+            <Text style={styles.subtitle}>SRM Properties</Text>
           </View>
 
           <TouchableOpacity
