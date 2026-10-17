@@ -2469,7 +2469,7 @@ export default function RentReportScreen() {
                                           {status === 'paid' ? (
                                             <View style={styles.sheetChipPaid}>
                                               <Text style={styles.sheetChipPaidText}>
-                                                ₹{(mData?.record?.paid_amount ?? (totalAmount > 0 ? totalAmount : rent)).toLocaleString('en-IN')}
+                                                ₹{(mData?.record?.paid_amount ?? mData?.record?.total_amount ?? mData?.record?.amount ?? row.tenant.rent_amount ?? 0).toLocaleString('en-IN')}
                                               </Text>
                                               {payDate ? <Text style={styles.sheetChipPaidDate}>{payDate}</Text> : null}
                                             </View>
@@ -2660,7 +2660,7 @@ export default function RentReportScreen() {
                                     {status === 'paid' ? (
                                       <View style={styles.sheetChipPaid}>
                                         <Text style={styles.sheetChipPaidText}>
-                                          ₹{(mData?.record?.paid_amount ?? (totalAmount > 0 ? totalAmount : rent)).toLocaleString('en-IN')}
+                                          ₹{(mData?.record?.paid_amount ?? mData?.record?.total_amount ?? mData?.record?.amount ?? row.tenant.rent_amount ?? 0).toLocaleString('en-IN')}
                                         </Text>
                                         {payDate ? <Text style={styles.sheetChipPaidDate}>{payDate}</Text> : null}
                                       </View>

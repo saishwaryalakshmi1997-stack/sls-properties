@@ -102,7 +102,7 @@ export const ToastContainer: React.FC = () => {
   const insets = useSafeAreaInsets();
   const [currentToast, setCurrentToast] = useState<ToastOptions | null>(null);
   const animValue = useRef(new Animated.Value(0)).current;
-  const timerRef = useRef<NodeJS.Timeout | null>(null);
+  const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const hideToast = useCallback(() => {
     if (timerRef.current) {

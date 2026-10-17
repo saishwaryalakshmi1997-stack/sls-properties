@@ -4,10 +4,22 @@ import {
   onPropertyDeleted,
   onTenantDeleted,
   onPaymentDeleted,
+  onTransactionDeleted,
+  onPaymentReset,
+  onFlatVacated,
+  formatFlatNumber,
+  getFlatNumberVariants,
 } from './database';
 import { supabase } from '../lib/supabase';
 
 let isSyncing = false;
+
+// In-memory sets to prevent resurrecting recently deleted records when pulling from cloud
+const deletedTenantIds = new Set<number>();
+const deletedPaymentIds = new Set<number>();
+const deletedTransactionIds = new Set<number>();
+const resetPaymentKeys = new Set<string>();
+const recentlyVacatedFlats = new Set<string>();
 
 // ---------------- EXPLICIT SCHEMA MAPPERS (FOR SUPABASE) ---------------- //
 
@@ -145,14 +157,18 @@ export async function pushLocalToCloud(): Promise<void> {
       if (error) console.warn('[Sync Push] Payments push notice:', error.message);
     }
 
-    // 4. Payment Transactions (only for properties and payments that exist)
+    // 4. Payment Transactions (only for properties and payments that exist, excluding deleted ones)
     const localTx = await db.getAllAsync<any>(
       'SELECT * FROM payment_transactions WHERE property_id IN (SELECT id FROM properties) AND payment_id IN (SELECT id FROM payments)'
     );
     if (localTx.length > 0) {
-      const payload = localTx.map(mapTransactionForCloud);
-      const { error } = await supabase.from('payment_transactions').upsert(payload, { onConflict: 'id' });
-      if (error) console.warn('[Sync Push] Transactions push notice:', error.message);
+      const payload = localTx
+        .filter((tx) => !deletedTransactionIds.has(tx.id))
+        .map(mapTransactionForCloud);
+      if (payload.length > 0) {
+        const { error } = await supabase.from('payment_transactions').upsert(payload, { onConflict: 'id' });
+        if (error) console.warn('[Sync Push] Transactions push notice:', error.message);
+      }
     }
 
     // 5. Flat EB Numbers
@@ -183,6 +199,18 @@ export async function pullCloudToLocal(): Promise<void> {
 
     if (!propErr && cloudProps && cloudProps.length > 0) {
       for (const p of cloudProps) {
+        const localProp = await db.getFirstAsync<any>(
+          'SELECT updated_at FROM properties WHERE id = ?',
+          [p.id]
+        );
+        if (localProp && localProp.updated_at) {
+          const localTime = new Date(localProp.updated_at).getTime();
+          const cloudTime = new Date(p.updated_at || 0).getTime();
+          if (localTime > cloudTime) {
+            continue;
+          }
+        }
+
         await db.runAsync(
           `INSERT INTO properties (id, building_name, building_address, location, units, landlord_name, notes, created_at, updated_at)
            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -216,6 +244,28 @@ export async function pullCloudToLocal(): Promise<void> {
 
     if (!tenantErr && cloudTenants && cloudTenants.length > 0) {
       for (const t of cloudTenants) {
+        const rawFlat = (t.flat_number || '').trim();
+        const normFlat = formatFlatNumber(rawFlat);
+        const flatKey = `${t.property_id}:${rawFlat.toLowerCase()}`;
+        const normKey = `${t.property_id}:${normFlat.toLowerCase()}`;
+
+        if (deletedTenantIds.has(t.id) || recentlyVacatedFlats.has(flatKey) || recentlyVacatedFlats.has(normKey)) {
+          deleteTenantFromCloud(t.id);
+          continue;
+        }
+
+        const localTenant = await db.getFirstAsync<any>(
+          'SELECT updated_at FROM tenants WHERE id = ?',
+          [t.id]
+        );
+        if (localTenant && localTenant.updated_at) {
+          const localTime = new Date(localTenant.updated_at).getTime();
+          const cloudTime = new Date(t.updated_at || 0).getTime();
+          if (localTime > cloudTime) {
+            continue;
+          }
+        }
+
         await db.runAsync(
           `INSERT INTO tenants (
              id, property_id, flat_number, name, phone_number, occupation, rent_amount,
@@ -308,39 +358,104 @@ export async function pullCloudToLocal(): Promise<void> {
 
     if (!payErr && cloudPayments && cloudPayments.length > 0) {
       for (const py of cloudPayments) {
-        await db.runAsync(
-          `INSERT INTO payments (id, property_id, flat_number, tenant_id, month_year, amount, total_amount, paid_amount, date_paid, due_date, notes, status, created_at, updated_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-           ON CONFLICT(id) DO UPDATE SET
-             property_id = excluded.property_id,
-             flat_number = excluded.flat_number,
-             tenant_id = excluded.tenant_id,
-             month_year = excluded.month_year,
-             amount = excluded.amount,
-             total_amount = excluded.total_amount,
-             paid_amount = excluded.paid_amount,
-             date_paid = excluded.date_paid,
-             due_date = excluded.due_date,
-             notes = excluded.notes,
-             status = excluded.status,
-             updated_at = excluded.updated_at`,
-          [
-            py.id,
-            py.property_id,
-            py.flat_number,
-            py.tenant_id || 0,
-            py.month_year,
-            py.amount || 0,
-            py.total_amount || 0,
-            py.paid_amount || 0,
-            py.date_paid || '',
-            py.due_date || '',
-            py.notes || '',
-            py.status || 'Paid',
-            py.created_at || new Date().toISOString(),
-            py.updated_at || new Date().toISOString(),
-          ]
+        const rawFlat = (py.flat_number || '').trim();
+        const normFlat = formatFlatNumber(rawFlat);
+        const flatKey = `${py.property_id}:${rawFlat.toLowerCase()}`;
+        const normKey = `${py.property_id}:${normFlat.toLowerCase()}`;
+
+        if (deletedPaymentIds.has(py.id) || recentlyVacatedFlats.has(flatKey) || recentlyVacatedFlats.has(normKey)) {
+          deletePaymentFromCloud(py.id);
+          continue;
+        }
+
+        const cleanM = (py.month_year || '').trim().toLowerCase();
+        const pyVariants = getFlatNumberVariants(rawFlat);
+        const isResetPay = pyVariants.some((v) =>
+          resetPaymentKeys.has(`${py.property_id}:${v.toLowerCase()}:${cleanM}`) ||
+          resetPaymentKeys.has(`${py.property_id}:${v.toLowerCase()}:${(py.month_year || '').trim()}`)
         );
+
+        if (isResetPay) {
+          // If payment was reset to Pending locally, ensure Supabase reflects it and DO NOT overwrite local
+          if (py.status === 'Paid' || (py.paid_amount || 0) > 0) {
+            resetPaymentInCloud(py.id);
+          }
+          continue;
+        }
+
+        // Check if payment already exists for this property, flat, and month to prevent duplicates
+        const placeholders = pyVariants.map(() => '?').join(', ');
+        const existingMatch = await db.getFirstAsync<any>(
+          `SELECT id, updated_at, status, paid_amount FROM payments 
+           WHERE property_id = ? AND flat_number IN (${placeholders}) 
+           AND (month_year = ? OR LOWER(TRIM(month_year)) = LOWER(TRIM(?)))`,
+          [py.property_id, ...pyVariants, py.month_year, py.month_year]
+        );
+
+        if (existingMatch) {
+          const localTime = existingMatch.updated_at ? new Date(existingMatch.updated_at).getTime() : 0;
+          const cloudTime = py.updated_at ? new Date(py.updated_at).getTime() : 0;
+          if (localTime >= cloudTime) {
+            continue;
+          }
+          // If local record was reset to Pending with paid_amount 0, NEVER overwrite with cloud Paid!
+          if (existingMatch.status === 'Pending' && (existingMatch.paid_amount || 0) === 0 && (py.status === 'Paid' || (py.paid_amount || 0) > 0)) {
+            continue;
+          }
+          await db.runAsync(
+            `UPDATE payments 
+             SET amount = ?, total_amount = ?, paid_amount = ?, date_paid = ?, due_date = ?, notes = ?, status = ?, updated_at = ?
+             WHERE id = ?`,
+            [
+              py.amount || 0,
+              py.total_amount || 0,
+              py.paid_amount || 0,
+              py.date_paid || '',
+              py.due_date || '',
+              py.notes || '',
+              py.status || 'Paid',
+              py.updated_at || new Date().toISOString(),
+              existingMatch.id,
+            ]
+          );
+        } else {
+          if (isResetPay) {
+            continue;
+          }
+          await db.runAsync(
+            `INSERT INTO payments (id, property_id, flat_number, tenant_id, month_year, amount, total_amount, paid_amount, date_paid, due_date, notes, status, created_at, updated_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             ON CONFLICT(id) DO UPDATE SET
+               property_id = excluded.property_id,
+               flat_number = excluded.flat_number,
+               tenant_id = excluded.tenant_id,
+               month_year = excluded.month_year,
+               amount = excluded.amount,
+               total_amount = excluded.total_amount,
+               paid_amount = excluded.paid_amount,
+               date_paid = excluded.date_paid,
+               due_date = excluded.due_date,
+               notes = excluded.notes,
+               status = excluded.status,
+               updated_at = excluded.updated_at`,
+            [
+              py.id,
+              py.property_id,
+              normFlat,
+              py.tenant_id || 0,
+              py.month_year,
+              py.amount || 0,
+              py.total_amount || 0,
+              py.paid_amount || 0,
+              py.date_paid || '',
+              py.due_date || '',
+              py.notes || '',
+              py.status || 'Paid',
+              py.created_at || new Date().toISOString(),
+              py.updated_at || new Date().toISOString(),
+            ]
+          );
+        }
       }
     }
 
@@ -351,6 +466,28 @@ export async function pullCloudToLocal(): Promise<void> {
 
     if (!txErr && cloudTx && cloudTx.length > 0) {
       for (const tx of cloudTx) {
+        const rawFlat = (tx.flat_number || '').trim();
+        const normFlat = formatFlatNumber(rawFlat);
+        const flatKey = `${tx.property_id}:${rawFlat.toLowerCase()}`;
+        const normKey = `${tx.property_id}:${normFlat.toLowerCase()}`;
+
+        if (recentlyVacatedFlats.has(flatKey) || recentlyVacatedFlats.has(normKey)) {
+          deleteTransactionFromCloud(tx.id);
+          continue;
+        }
+
+        const cleanM = (tx.month_year || '').trim().toLowerCase();
+        const txVariants = getFlatNumberVariants(rawFlat);
+        const isResetTx = txVariants.some((v) =>
+          resetPaymentKeys.has(`${tx.property_id}:${v.toLowerCase()}:${cleanM}`) ||
+          resetPaymentKeys.has(`${tx.property_id}:${v.toLowerCase()}:${(tx.month_year || '').trim()}`)
+        );
+
+        if (deletedTransactionIds.has(tx.id) || isResetTx) {
+          deleteTransactionFromCloud(tx.id);
+          continue;
+        }
+
         await db.runAsync(
           `INSERT INTO payment_transactions (id, payment_id, property_id, flat_number, month_year, amount, date_paid, notes, created_at)
            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -362,7 +499,7 @@ export async function pullCloudToLocal(): Promise<void> {
             tx.id,
             tx.payment_id || 0,
             tx.property_id,
-            tx.flat_number,
+            normFlat,
             tx.month_year,
             tx.amount || 0,
             tx.date_paid || '',
@@ -380,6 +517,18 @@ export async function pullCloudToLocal(): Promise<void> {
 
     if (!ebErr && cloudEb && cloudEb.length > 0) {
       for (const eb of cloudEb) {
+        const localEb = await db.getFirstAsync<any>(
+          'SELECT updated_at FROM flat_eb_numbers WHERE property_id = ? AND flat_number = ?',
+          [eb.property_id, eb.flat_number]
+        );
+        if (localEb && localEb.updated_at) {
+          const localTime = new Date(localEb.updated_at).getTime();
+          const cloudTime = new Date(eb.updated_at || 0).getTime();
+          if (localTime > cloudTime) {
+            continue;
+          }
+        }
+
         await db.runAsync(
           `INSERT INTO flat_eb_numbers (property_id, flat_number, eb_number, updated_at)
            VALUES (?, ?, ?, ?)
@@ -401,17 +550,17 @@ export async function pullCloudToLocal(): Promise<void> {
 }
 
 /**
- * Main 2-way sync: Pulls cloud updates first, then pushes local changes.
+ * Main 2-way sync: Pushes local changes FIRST, then pulls cloud updates.
  * Guaranteed never to throw errors or freeze the UI if offline.
  */
 export async function syncAll(): Promise<void> {
   if (isSyncing) return;
   isSyncing = true;
   try {
-    // 1. Pull updates from cloud (Phone 2 gets Phone 1's changes)
-    await pullCloudToLocal();
-    // 2. Push any local additions/edits to cloud
+    // 1. PUSH local additions/edits to cloud FIRST so local changes are safely recorded remotely
     await pushLocalToCloud();
+    // 2. PULL updates from cloud (Phone 2 gets Phone 1's changes) with timestamp protection
+    await pullCloudToLocal();
   } catch (err: any) {
     console.warn('[Cloud Sync] Background sync notice:', err?.message || err);
   } finally {
@@ -434,30 +583,59 @@ export function deletePropertyFromCloud(id: number): void {
     .eq('id', id)
     .then(({ error }) => {
       if (error) console.warn('[Sync] deleteProperty notice:', error.message);
-    })
-    .catch(() => {});
+    }, () => {});
 }
 
 export function deleteTenantFromCloud(id: number): void {
+  deletedTenantIds.add(id);
   supabase
     .from('tenants')
     .delete()
     .eq('id', id)
     .then(({ error }) => {
       if (error) console.warn('[Sync] deleteTenant notice:', error.message);
-    })
-    .catch(() => {});
+    }, () => {});
 }
 
 export function deletePaymentFromCloud(id: number): void {
+  deletedPaymentIds.add(id);
   supabase
     .from('payments')
     .delete()
     .eq('id', id)
     .then(({ error }) => {
       if (error) console.warn('[Sync] deletePayment notice:', error.message);
+    }, () => {});
+}
+
+export function deleteTransactionFromCloud(id: number): void {
+  deletedTransactionIds.add(id);
+  supabase
+    .from('payment_transactions')
+    .delete()
+    .eq('id', id)
+    .then(({ error }) => {
+      if (error) console.warn('[Sync] deleteTransaction notice:', error.message);
+    }, () => {});
+}
+
+export function resetPaymentInCloud(id: number): void {
+  supabase
+    .from('payments')
+    .update({
+      paid_amount: 0,
+      status: 'Pending',
+      date_paid: '',
+      notes: '',
+      updated_at: new Date().toISOString(),
     })
-    .catch(() => {});
+    .eq('id', id)
+    .then(
+      ({ error }) => {
+        if (error) console.warn('[Sync] resetPayment notice:', error.message);
+      },
+      () => {}
+    );
 }
 
 // ---------------- WIRE DATABASE OBSERVER LISTENERS ---------------- //
@@ -477,4 +655,79 @@ onTenantDeleted((id) => {
 
 onPaymentDeleted((id) => {
   deletePaymentFromCloud(id);
+});
+
+onTransactionDeleted((txId) => {
+  deleteTransactionFromCloud(txId);
+});
+
+onPaymentReset(async (propertyId, flatNumber, normFlat, monthYear, txIds, paymentIds, flatVariants) => {
+  const cleanM = monthYear.trim().toLowerCase();
+  const variants = flatVariants && flatVariants.length > 0 ? flatVariants : getFlatNumberVariants(flatNumber);
+
+  for (const v of variants) {
+    resetPaymentKeys.add(`${propertyId}:${v.trim().toLowerCase()}:${cleanM}`);
+    resetPaymentKeys.add(`${propertyId}:${v.trim().toLowerCase()}:${monthYear.trim()}`);
+  }
+
+  txIds.forEach((id) => deletedTransactionIds.add(id));
+
+  try {
+    if (txIds.length > 0) {
+      await supabase.from('payment_transactions').delete().in('id', txIds);
+    }
+    if (paymentIds.length > 0) {
+      await supabase.from('payment_transactions').delete().in('payment_id', paymentIds);
+    }
+    await supabase
+      .from('payment_transactions')
+      .delete()
+      .eq('property_id', propertyId)
+      .ilike('month_year', monthYear.trim())
+      .in('flat_number', variants);
+
+    // Update Supabase payment to Pending with 0 paid
+    await supabase
+      .from('payments')
+      .update({
+        paid_amount: 0,
+        status: 'Pending',
+        date_paid: '',
+        notes: '',
+        updated_at: new Date().toISOString(),
+      })
+      .eq('property_id', propertyId)
+      .ilike('month_year', monthYear.trim())
+      .in('flat_number', variants);
+
+    if (paymentIds.length > 0) {
+      await supabase
+        .from('payments')
+        .update({
+          paid_amount: 0,
+          status: 'Pending',
+          date_paid: '',
+          notes: '',
+          updated_at: new Date().toISOString(),
+        })
+        .in('id', paymentIds);
+    }
+  } catch (err) {
+    console.warn('[Sync] Cloud deletion on payment reset notice:', err);
+  }
+});
+
+onFlatVacated(async (propertyId, flatNumber, normFlat) => {
+  const key1 = `${propertyId}:${flatNumber.toLowerCase()}`;
+  const key2 = `${propertyId}:${normFlat.toLowerCase()}`;
+  recentlyVacatedFlats.add(key1);
+  recentlyVacatedFlats.add(key2);
+
+  try {
+    await supabase.from('payment_transactions').delete().eq('property_id', propertyId).in('flat_number', [flatNumber, normFlat]);
+    await supabase.from('payments').delete().eq('property_id', propertyId).in('flat_number', [flatNumber, normFlat]);
+    await supabase.from('tenants').delete().eq('property_id', propertyId).in('flat_number', [flatNumber, normFlat]);
+  } catch (err) {
+    console.warn('[Sync] Cloud deletion on flat vacate notice:', err);
+  }
 });

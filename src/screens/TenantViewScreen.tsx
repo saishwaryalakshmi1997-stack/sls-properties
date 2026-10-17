@@ -23,6 +23,7 @@ import {
   PaymentRecord,
   PaymentTransaction,
   Tenant,
+  getTenantForFlat,
   getPaymentsForFlat,
   markPaymentAsPaid,
   updatePaymentRecord,
@@ -34,7 +35,6 @@ import {
   compareMonthYear,
   parseDateSafe,
   isRentDue,
-  computeNextStartDate,
   formatFlatNumber,
 } from '../db/database';
 import { Colors } from '../theme/colors';
@@ -99,6 +99,7 @@ export default function TenantViewScreen({
   const [showDatePicker, setShowDatePicker] = useState(false);
   const [notes, setNotes] = useState('');
   const [targetMonth, setTargetMonth] = useState('');
+  const [submittingPayment, setSubmittingPayment] = useState(false);
 
 
 
@@ -122,12 +123,20 @@ export default function TenantViewScreen({
     if (!property?.id || !flat?.flat_number) return;
     try {
       setLoading(true);
+
+      // Always load the latest tenant directly from SQLite to guarantee edited dates/amounts are live
+      const freshTenant = await getTenantForFlat(property.id, flat.flat_number);
+      if (freshTenant) {
+        setCurrentTenant(freshTenant);
+      }
+      const activeTenant = freshTenant || tenant;
+
       const data = await getPaymentsForFlat(
         property.id,
         flat.flat_number,
-        tenant?.rent_amount || 5000,
-        tenant?.due_day || 5,
-        tenant?.rent_start_date
+        activeTenant?.rent_amount || 5000,
+        activeTenant?.due_day || 5,
+        activeTenant?.rent_start_date
       );
       setPayments(data);
 
@@ -138,7 +147,7 @@ export default function TenantViewScreen({
         data[0];
       if (active) {
         setTargetMonth(active.month_year);
-        const total = active.total_amount || active.amount || (tenant?.rent_amount || 5000);
+        const total = active.total_amount || active.amount || (activeTenant?.rent_amount || 5000);
         const paid = active.paid_amount || 0;
         setAmountPaid(String(Math.max(0, total - paid)));
       }
@@ -149,13 +158,20 @@ export default function TenantViewScreen({
     }
   };
 
+  // Sync state if props change (e.g. after editing tenant details)
+  useEffect(() => {
+    if (flat.tenant) {
+      setCurrentTenant(flat.tenant);
+    }
+  }, [flat.tenant]);
+
   useEffect(() => {
     if (property?.id && flat?.flat_number) {
       loadPaymentData();
     }
     const today = getTodayFormatted();
     setDatePaid(today);
-  }, [property?.id, flat?.flat_number]);
+  }, [property?.id, flat?.flat_number, flat.tenant?.rent_start_date, flat.tenant?.rent_amount]);
 
   // Hardware Back Button Handler
   useEffect(() => {
@@ -223,8 +239,14 @@ export default function TenantViewScreen({
 
   const currentBalance = totalPendingBalance;
 
-  // Compute Next Start Date string dynamically (e.g. 01 Oct 2026)
-  const nextStartDate = computeNextStartDate(tenant?.rent_start_date, tenant?.due_day, payments);
+  // Total rent paid by the tenant across all recorded payments/transactions
+  const totalRentPaid = payments.reduce((sum, p) => {
+    const total = p.total_amount || p.amount || (tenant?.rent_amount || 5000);
+    const txSum = (p.transactions || []).reduce((s, tx) => s + (Number(tx.amount) || 0), 0);
+    const rawPaid = p.paid_amount !== undefined ? Number(p.paid_amount) || 0 : (p.status === 'Paid' ? total : 0);
+    const paid = Math.max(rawPaid, txSum);
+    return sum + paid;
+  }, 0);
 
   // Header Title format: "{flatDisplay}, {tenantShortName}"
   const flatDisplay = formatFlatNumber(flat.flat_number);
@@ -245,7 +267,13 @@ export default function TenantViewScreen({
     const pStart = parseMonthYear(firstP.month_year);
     const pEnd = parseMonthYear(lastP.month_year);
     if (pStart && pEnd) {
-      const sDay = '01';
+      let sDay = '01';
+      if (tenant?.rent_start_date) {
+        const startD = parseDateSafe(tenant.rent_start_date);
+        if (startD.getMonth() === pStart.monthIndex && startD.getFullYear() === pStart.year) {
+          sDay = String(startD.getDate()).padStart(2, '0');
+        }
+      }
       const sMonth = MONTH_SHORT[pStart.monthIndex];
       const sYear = pStart.year;
       const eLastDay = new Date(pEnd.year, pEnd.monthIndex + 1, 0).getDate();
@@ -321,10 +349,10 @@ export default function TenantViewScreen({
     });
   };
 
-  // Payment History: Only show paid month badges
-  const paidHistoryPayments = payments.filter(
-    (p) => p.status === 'Paid' || (p.paid_amount !== undefined && p.paid_amount > 0)
-  );
+  // Payment History: Only show paid month badges, sorted recent month to previous months
+  const paidHistoryPayments = [...payments]
+    .filter((p) => p.status === 'Paid' || (p.paid_amount !== undefined && p.paid_amount > 0))
+    .sort((a, b) => compareMonthYear(b.month_year, a.month_year));
 
   const handleOpenPaymentDetails = (payment: PaymentRecord) => {
     setSelectedHistoryPayment(payment);
@@ -504,6 +532,7 @@ export default function TenantViewScreen({
 
   // Confirm Payment
   const handleConfirmPayment = async () => {
+    if (submittingPayment) return;
     const payingNow = Number(amountPaid) || 0;
     if (payingNow <= 0) {
       Toast.warning('Invalid Amount', 'Please enter an amount greater than 0.');
@@ -511,6 +540,7 @@ export default function TenantViewScreen({
     }
 
     try {
+      setSubmittingPayment(true);
       const result = await markPaymentAsPaid(
         property.id,
         flat.flat_number,
@@ -537,6 +567,8 @@ export default function TenantViewScreen({
     } catch (err) {
       console.error('[TenantView] Error confirming payment:', err);
       Toast.error('Error', 'Failed to save payment record.');
+    } finally {
+      setSubmittingPayment(false);
     }
   };
 
@@ -686,14 +718,12 @@ export default function TenantViewScreen({
           {/* ---------------- 3. BALANCE SUMMARY ROW (3-Part Layout) ---------------- */}
           <View style={styles.balanceSummaryRow}>
             <View style={styles.balanceSummaryColLeft}>
-              <Text style={styles.balanceSummaryDate}>{nextStartDate}</Text>
-              <Text style={styles.balanceSummarySub}>Next Start Date</Text>
+              <Text style={styles.balanceSummaryAmount}>
+                ₹ {totalRentPaid.toLocaleString('en-IN')}
+              </Text>
+              <Text style={styles.balanceSummarySub}>Total Rent Paid</Text>
             </View>
 
-            <View style={styles.balanceSummaryColCenter}>
-              <Text style={styles.balanceSummaryCenterLabel}>Net</Text>
-              <Text style={styles.balanceSummaryCenterLabel}>Balance</Text>
-            </View>
 
             <View style={styles.balanceSummaryColRight}>
               <Text style={styles.balanceSummaryAmount}>
@@ -845,10 +875,7 @@ export default function TenantViewScreen({
             </Text>
           </View>
 
-          {/* Bill Issued Caption */}
-          <Text style={styles.billIssuedCaption}>
-            Bill Issued {billIssuedDate}
-          </Text>
+
 
           {/* Overdue Unpaid Months (Chips row) */}
           {dueUnpaidPayments.length > 0 && (
@@ -1062,12 +1089,19 @@ export default function TenantViewScreen({
             />
 
             <TouchableOpacity
-              style={styles.confirmPaymentBtn}
+              style={[styles.confirmPaymentBtn, submittingPayment && { opacity: 0.6 }]}
               onPress={handleConfirmPayment}
+              disabled={submittingPayment}
               activeOpacity={0.85}
             >
-              <MaterialCommunityIcons name="check-circle-outline" size={20} color="#FFFFFF" />
-              <Text style={styles.confirmPaymentBtnText}>Confirm Payment</Text>
+              {submittingPayment ? (
+                <ActivityIndicator size="small" color="#FFFFFF" />
+              ) : (
+                <>
+                  <MaterialCommunityIcons name="check-circle-outline" size={20} color="#FFFFFF" />
+                  <Text style={styles.confirmPaymentBtnText}>Confirm Payment</Text>
+                </>
+              )}
             </TouchableOpacity>
           </View>
         </KeyboardAvoidingView>
@@ -2139,7 +2173,7 @@ const styles = StyleSheet.create({
     justifyContent: 'flex-end',
   },
   modalBackdrop: {
-    ...StyleSheet.absoluteFillObject,
+    ...StyleSheet.absoluteFill,
     backgroundColor: 'rgba(15, 23, 42, 0.5)',
   },
   bottomSheet: {

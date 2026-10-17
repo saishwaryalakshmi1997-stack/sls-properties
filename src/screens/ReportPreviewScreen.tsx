@@ -581,7 +581,7 @@ const styles = StyleSheet.create({
     backgroundColor: '#FFFFFF',
   },
   webViewLoading: {
-    ...StyleSheet.absoluteFillObject,
+    ...StyleSheet.absoluteFill,
     backgroundColor: '#FFFFFF',
     justifyContent: 'center',
     alignItems: 'center',

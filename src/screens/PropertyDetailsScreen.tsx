@@ -541,6 +541,9 @@ export default function PropertyDetailsScreen({
     if (!tenantFlatNumber.trim()) {
       errors.flatNumber = 'Unit / Flat is required';
     }
+    if (tenantIsIdVerified && !tenantIdProofNumber.trim()) {
+      errors.aadharId = 'Please enter Aadhar ID';
+    }
     setFormErrors(errors);
     return Object.keys(errors).length === 0;
   };
@@ -548,7 +551,11 @@ export default function PropertyDetailsScreen({
   // Save Tenant
   const handleSaveTenant = async () => {
     if (!validateStep1()) {
-      Toast.warning('Incomplete Details', 'Tenant name, phone number, and unit are required.');
+      if (tenantIsIdVerified && !tenantIdProofNumber.trim()) {
+        Toast.warning('Aadhar ID Required', 'Please enter Aadhar ID as ID is marked as verified.');
+      } else {
+        Toast.warning('Incomplete Details', 'Tenant name, phone number, and unit are required.');
+      }
       setTenantStep(1);
       return;
     }
@@ -1317,17 +1324,30 @@ export default function PropertyDetailsScreen({
                     onRightIconPress={handleOpenContactPicker}
                   />
 
-                  {/* ID Proof Number - Animated Floating Label */}
+                  {/* Aadhar ID - Animated Floating Label */}
                   <FloatingLabelInput
-                    label="ID Proof Number"
+                    label="Aadhar ID"
+                    required={tenantIsIdVerified}
                     value={tenantIdProofNumber}
-                    onChangeText={setTenantIdProofNumber}
+                    onChangeText={(text) => {
+                      setTenantIdProofNumber(text);
+                      if (formErrors.aadharId) {
+                        setFormErrors((prev) => ({ ...prev, aadharId: '' }));
+                      }
+                    }}
+                    error={formErrors.aadharId}
                   />
 
                   {/* Mark ID as verified */}
                   <TouchableOpacity
                     style={styles.checkboxRow}
-                    onPress={() => setTenantIsIdVerified(!tenantIsIdVerified)}
+                    onPress={() => {
+                      const nextVal = !tenantIsIdVerified;
+                      setTenantIsIdVerified(nextVal);
+                      if (!nextVal && formErrors.aadharId) {
+                        setFormErrors((prev) => ({ ...prev, aadharId: '' }));
+                      }
+                    }}
                     activeOpacity={0.8}
                   >
                     <Text style={styles.checkboxLabel}>Mark ID as verified</Text>
@@ -1699,9 +1719,6 @@ const styles = StyleSheet.create({
     borderRadius: 8,
     backgroundColor: 'rgba(255, 255, 255, 0.18)',
   },
-  headerDotsBtn: {
-    padding: 6,
-  },
   headerEditBtn: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -1760,11 +1777,6 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'space-between',
     marginBottom: 12,
-  },
-  currentStatusTitle: {
-    fontSize: 16,
-    fontWeight: '700',
-    color: Colors.primaryDark,
   },
   statusButtonsRow: {
     flexDirection: 'row',
@@ -1860,19 +1872,6 @@ const styles = StyleSheet.create({
     gap: 10,
     marginBottom: 14,
     paddingLeft: 4,
-  },
-  circlePlusBtn: {
-    width: 32,
-    height: 32,
-    borderRadius: 16,
-    backgroundColor: Colors.primary,
-    alignItems: 'center',
-    justifyContent: 'center',
-    shadowColor: Colors.primary,
-    shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.3,
-    shadowRadius: 4,
-    elevation: 2,
   },
   addTenantLabel: {
     fontSize: 14,

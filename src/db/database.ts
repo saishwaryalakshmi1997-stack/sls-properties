@@ -27,6 +27,33 @@ export function onPaymentDeleted(fn: IdListener) {
   payDeleteListeners.push(fn);
 }
 
+type TxDeletedListener = (txId: number) => Promise<void> | void;
+const txDeleteListeners: TxDeletedListener[] = [];
+export function onTransactionDeleted(fn: TxDeletedListener) {
+  txDeleteListeners.push(fn);
+}
+
+type PaymentResetListener = (
+  propertyId: number,
+  flatNumber: string,
+  normFlat: string,
+  monthYear: string,
+  txIds: number[],
+  paymentIds: number[],
+  flatVariants?: string[]
+) => Promise<void> | void;
+const paymentResetListeners: PaymentResetListener[] = [];
+export function onPaymentReset(fn: PaymentResetListener) {
+  paymentResetListeners.push(fn);
+}
+
+type FlatVacatedListener = (propertyId: number, flatNumber: string, normFlat: string) => void;
+const flatVacatedListeners: FlatVacatedListener[] = [];
+
+export function onFlatVacated(fn: FlatVacatedListener) {
+  flatVacatedListeners.push(fn);
+}
+
 function notifyChange() {
   changeListeners.forEach((fn) => {
     try {
@@ -65,6 +92,46 @@ function notifyPaymentDeleted(id: number) {
       console.warn('[SQLite] Payment delete listener error:', err);
     }
   });
+}
+
+function notifyFlatVacated(propertyId: number, flatNumber: string, normFlat: string) {
+  flatVacatedListeners.forEach((fn) => {
+    try {
+      fn(propertyId, flatNumber, normFlat);
+    } catch (err) {
+      console.warn('[SQLite] Flat vacate listener error:', err);
+    }
+  });
+}
+
+async function notifyTransactionDeleted(txId: number): Promise<void> {
+  const promises = txDeleteListeners.map(async (fn) => {
+    try {
+      await fn(txId);
+    } catch (err) {
+      console.warn('[SQLite] Transaction delete listener error:', err);
+    }
+  });
+  await Promise.all(promises);
+}
+
+async function notifyPaymentReset(
+  propertyId: number,
+  flatNumber: string,
+  normFlat: string,
+  monthYear: string,
+  txIds: number[],
+  paymentIds: number[],
+  flatVariants?: string[]
+): Promise<void> {
+  const promises = paymentResetListeners.map(async (fn) => {
+    try {
+      await fn(propertyId, flatNumber, normFlat, monthYear, txIds, paymentIds, flatVariants);
+    } catch (err) {
+      console.warn('[SQLite] Payment reset listener error:', err);
+    }
+  });
+  await Promise.all(promises);
 }
 
 export interface TestLogRecord {
@@ -172,6 +239,45 @@ export function formatFlatNumber(flatNumber?: string | null): string {
   }
 
   return s;
+}
+
+/**
+ * Returns all common format variants for a flat number (e.g. "Flat 1", "1", "flat 1", "flat-1")
+ * so queries never fail due to differences in prefix formatting.
+ */
+export function getFlatNumberVariants(flatNumber?: string | null): string[] {
+  if (!flatNumber || !flatNumber.trim()) return [];
+  const raw = flatNumber.trim();
+  const norm = formatFlatNumber(raw);
+
+  let stripped = raw;
+  while (/^(flat|flats)\s*[-:]?\s*/i.test(stripped) || /^[-:]+\s*/.test(stripped)) {
+    stripped = stripped.replace(/^(flat|flats)\s*[-:]?\s*/i, '').replace(/^[-:]+\s*/, '').trim();
+  }
+
+  const set = new Set<string>();
+  if (raw) set.add(raw);
+  if (norm) set.add(norm);
+  if (stripped) {
+    set.add(stripped);
+    set.add(`Flat ${stripped}`);
+    set.add(`flat ${stripped}`);
+    set.add(`flat-${stripped}`);
+    set.add(`Flat-${stripped}`);
+  }
+  return Array.from(set);
+}
+
+export async function getTenantForFlat(propertyId: number, flatNumber: string): Promise<Tenant | null> {
+  const db = await getDatabase();
+  const variants = getFlatNumberVariants(flatNumber);
+  if (variants.length === 0) return null;
+  const placeholders = variants.map(() => '?').join(', ');
+  const row = await db.getFirstAsync<Tenant>(
+    `SELECT * FROM tenants WHERE property_id = ? AND flat_number IN (${placeholders}) AND is_occupied = 1 ORDER BY id DESC`,
+    [propertyId, ...variants]
+  );
+  return row || null;
 }
 
 
@@ -492,6 +598,68 @@ async function ensureTables(db: SQLite.SQLiteDatabase): Promise<void> {
       }
     } catch (cleanFlatErr) {
       console.warn('[SQLite] Flat number normalization notice:', cleanFlatErr);
+    }
+
+    // 5. Reconcile Payments with Payment Transactions
+    try {
+      const txSums = await db.getAllAsync<{ payment_id: number; sum_amount: number; last_date: string }>(
+        `SELECT payment_id, SUM(amount) as sum_amount, MAX(date_paid) as last_date 
+         FROM payment_transactions 
+         WHERE payment_id > 0 
+         GROUP BY payment_id`
+      );
+      for (const item of txSums) {
+        if (item.payment_id && item.sum_amount > 0) {
+          const pay = await db.getFirstAsync<PaymentRecord>(
+            'SELECT * FROM payments WHERE id = ?',
+            [item.payment_id]
+          );
+          if (pay) {
+            const total = Number(pay.total_amount || pay.amount || 0);
+            const txSum = Number(item.sum_amount) || 0;
+            const effectivePaid = Math.max(Number(pay.paid_amount) || 0, txSum);
+            const isPaid = total > 0 && effectivePaid >= total;
+            const newStatus: 'Paid' | 'Partial' | 'Pending' = isPaid ? 'Paid' : (effectivePaid > 0 ? 'Partial' : pay.status);
+            const dPaid = pay.date_paid && pay.date_paid.trim() ? pay.date_paid : (item.last_date ? `Paid ${item.last_date}` : '');
+            if (pay.paid_amount !== effectivePaid || pay.status !== newStatus) {
+              await db.runAsync(
+                `UPDATE payments 
+                 SET paid_amount = ?, status = ?, date_paid = ?, updated_at = ? 
+                 WHERE id = ?`,
+                [effectivePaid, newStatus, dPaid, new Date().toISOString(), pay.id]
+              );
+            }
+          }
+        }
+      }
+    } catch (reconcileErr) {
+      console.warn('[SQLite] Payment reconciliation notice:', reconcileErr);
+    }
+
+    // 6. Deduplicate payments: merge and remove any duplicates for the same property, flat, and month_year
+    try {
+      const dupes = await db.getAllAsync<{ property_id: number; flat_number: string; month_year: string; count: number }>(
+        `SELECT property_id, flat_number, month_year, COUNT(*) as count 
+         FROM payments 
+         GROUP BY property_id, flat_number, month_year 
+         HAVING count > 1`
+      );
+      for (const d of dupes) {
+        const allRows = await db.getAllAsync<PaymentRecord>(
+          'SELECT * FROM payments WHERE property_id = ? AND flat_number = ? AND month_year = ? ORDER BY paid_amount DESC, id DESC',
+          [d.property_id, d.flat_number, d.month_year]
+        );
+        if (allRows.length > 1) {
+          const keep = allRows[0];
+          const delIds = allRows.slice(1).map((r) => r.id);
+          for (const delId of delIds) {
+            await db.runAsync('UPDATE payment_transactions SET payment_id = ? WHERE payment_id = ?', [keep.id, delId]);
+            await db.runAsync('DELETE FROM payments WHERE id = ?', [delId]);
+          }
+        }
+      }
+    } catch (dedupeErr) {
+      console.warn('[SQLite] Payment deduplication notice:', dedupeErr);
     }
   } catch (migErr) {
     console.warn('[SQLite] Column migration notice:', migErr);
@@ -958,58 +1126,19 @@ export async function addOrUpdateTenant(input: TenantInput): Promise<number> {
     tenantId = result.lastInsertRowId;
   }
 
-  // Ensure initial payment record exists for this flat based on tenant's rent_start_date
+  // Ensure payment records for this flat synchronize with tenant's rent_start_date and rent_amount
   try {
     const rentAmount = Number(input.rent_amount) || 0;
     const dueDay = Number(input.due_day) || 5;
-    const startDate = parseDateSafe(input.rent_start_date);
-    const startMonthYear = getMonthYearFromDate(startDate);
-    const dueDateStr = formatDueDateForMonth(startMonthYear, dueDay);
-
-    const existingPayments = await db.getAllAsync<PaymentRecord>(
-      'SELECT * FROM payments WHERE property_id = ? AND (flat_number = ? OR flat_number = ?)',
-      [input.property_id, cleanFlat, rawFlat]
+    await getPaymentsForFlat(
+      input.property_id,
+      cleanFlat,
+      rentAmount,
+      dueDay,
+      input.rent_start_date
     );
-
-    if (existingPayments.length === 0) {
-      await db.runAsync(
-        `INSERT INTO payments (property_id, flat_number, tenant_id, month_year, amount, total_amount, paid_amount, date_paid, due_date, notes, status, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, 0, '', ?, '', 'Pending', ?, ?)`,
-        [
-          input.property_id,
-          cleanFlat,
-          tenantId,
-          startMonthYear,
-          rentAmount,
-          rentAmount,
-          dueDateStr,
-          now,
-          now,
-        ]
-      );
-    } else if (
-      existingPayments.length === 1 &&
-      existingPayments[0].status === 'Pending' &&
-      (existingPayments[0].paid_amount || 0) === 0
-    ) {
-      // If tenant modified start date before any payments were made, update the pending month
-      await db.runAsync(
-        `UPDATE payments 
-         SET month_year = ?, amount = ?, total_amount = ?, due_date = ?, tenant_id = ?, updated_at = ?
-         WHERE id = ?`,
-        [
-          startMonthYear,
-          rentAmount,
-          rentAmount,
-          dueDateStr,
-          tenantId,
-          now,
-          existingPayments[0].id,
-        ]
-      );
-    }
   } catch (payInitErr) {
-    console.warn('[SQLite] Error ensuring initial payment record on tenant save:', payInitErr);
+    console.warn('[SQLite] Error ensuring payment records on tenant save:', payInitErr);
   }
 
   // Save / update EB number in flat_eb_numbers so it persists across tenant vacating
@@ -1031,8 +1160,8 @@ export async function removeTenantFromFlat(
 
   // Preserve the existing EB number before removing tenant so it is never lost on vacate
   try {
-    const currentTenant = await db.getFirstAsync<{ eb_number: string }>(
-      'SELECT eb_number FROM tenants WHERE property_id = ? AND (flat_number = ? OR flat_number = ?)',
+    const currentTenant = await db.getFirstAsync<{ id: number; eb_number: string }>(
+      'SELECT id, eb_number FROM tenants WHERE property_id = ? AND (flat_number = ? OR flat_number = ?)',
       [propertyId, cleanFlat, normFlat]
     );
     if (currentTenant && currentTenant.eb_number && currentTenant.eb_number.trim()) {
@@ -1041,6 +1170,16 @@ export async function removeTenantFromFlat(
   } catch (ebErr) {
     console.warn('[SQLite] Error preserving EB number on vacate:', ebErr);
   }
+
+  // Get matching tenant IDs and payment IDs for cloud cleanup notification
+  const matchingTenants = await db.getAllAsync<{ id: number }>(
+    'SELECT id FROM tenants WHERE property_id = ? AND (flat_number = ? OR flat_number = ?)',
+    [propertyId, cleanFlat, normFlat]
+  );
+  const matchingPayments = await db.getAllAsync<{ id: number }>(
+    'SELECT id FROM payments WHERE property_id = ? AND (flat_number = ? OR flat_number = ?)',
+    [propertyId, cleanFlat, normFlat]
+  );
 
   await db.runAsync(
     'DELETE FROM tenants WHERE property_id = ? AND (flat_number = ? OR flat_number = ?)',
@@ -1055,6 +1194,15 @@ export async function removeTenantFromFlat(
     'DELETE FROM payment_transactions WHERE property_id = ? AND (flat_number = ? OR flat_number = ?)',
     [propertyId, cleanFlat, normFlat]
   );
+
+  // Notify listeners so cloud sync immediately deletes them and never restores them
+  for (const t of matchingTenants) {
+    notifyTenantDeleted(t.id);
+  }
+  for (const p of matchingPayments) {
+    notifyPaymentDeleted(p.id);
+  }
+  notifyFlatVacated(propertyId, cleanFlat, normFlat);
   notifyChange();
 }
 
@@ -1065,21 +1213,32 @@ export async function removeTenantById(tenantId: number): Promise<void> {
     [tenantId]
   );
   if (tenant) {
+    const normFlat = formatFlatNumber(tenant.flat_number);
     if (tenant.eb_number && tenant.eb_number.trim()) {
       try {
-        await saveFlatEbNumber(tenant.property_id, tenant.flat_number.trim(), tenant.eb_number.trim());
+        await saveFlatEbNumber(tenant.property_id, normFlat, tenant.eb_number.trim());
       } catch (ebErr) {
         console.warn('[SQLite] Error preserving EB number on vacate by ID:', ebErr);
       }
     }
-    await db.runAsync('DELETE FROM payments WHERE property_id = ? AND flat_number = ?', [
+    const matchingPayments = await db.getAllAsync<{ id: number }>(
+      'SELECT id FROM payments WHERE property_id = ? AND (flat_number = ? OR flat_number = ?)',
+      [tenant.property_id, tenant.flat_number, normFlat]
+    );
+    await db.runAsync('DELETE FROM payments WHERE property_id = ? AND (flat_number = ? OR flat_number = ?)', [
       tenant.property_id,
       tenant.flat_number,
+      normFlat,
     ]);
-    await db.runAsync('DELETE FROM payment_transactions WHERE property_id = ? AND flat_number = ?', [
+    await db.runAsync('DELETE FROM payment_transactions WHERE property_id = ? AND (flat_number = ? OR flat_number = ?)', [
       tenant.property_id,
       tenant.flat_number,
+      normFlat,
     ]);
+    for (const p of matchingPayments) {
+      notifyPaymentDeleted(p.id);
+    }
+    notifyFlatVacated(tenant.property_id, tenant.flat_number, normFlat);
   }
   await db.runAsync('DELETE FROM tenants WHERE id = ?', [tenantId]);
   notifyTenantDeleted(tenantId);
@@ -1149,8 +1308,11 @@ export function parseDateSafe(dateStr?: string): Date {
   if (!dateStr || !dateStr.trim()) return new Date();
   const trimmed = dateStr.trim();
 
-  // Try DD-MM-YYYY or DD-Mon-YYYY or YYYY-MM-DD
-  const dashParts = trimmed.split('-');
+  // Normalize delimiters: replace slashes, dots, and whitespace with single dash
+  const normalized = trimmed.replace(/[\/\.]/g, '-').replace(/\s+/g, '-');
+  const dashParts = normalized.split('-').filter(Boolean);
+
+  // Case 1: 3 parts (DD-MM-YYYY or YYYY-MM-DD or DD-Mon-YYYY)
   if (dashParts.length === 3) {
     if (dashParts[0].length === 4) {
       const year = parseInt(dashParts[0], 10);
@@ -1167,11 +1329,52 @@ export function parseDateSafe(dateStr?: string): Date {
       if (month === undefined) {
         month = parseInt(dashParts[1], 10) - 1;
       }
-      const year = parseInt(dashParts[2], 10);
+      let year = parseInt(dashParts[2], 10);
+      if (year < 100) year += 2000;
       if (!isNaN(day) && month !== undefined && !isNaN(month) && !isNaN(year)) {
         const d = new Date(year, month, day);
         if (!isNaN(d.getTime())) return d;
       }
+    }
+  }
+
+  // Case 2: 2 parts (e.g. "1-Aug" or "Aug-1" or "01-08")
+  if (dashParts.length === 2) {
+    const currentYear = new Date().getFullYear();
+    const p0Month = MONTH_MAP[dashParts[0].toLowerCase().slice(0, 3)];
+    const p1Month = MONTH_MAP[dashParts[1].toLowerCase().slice(0, 3)];
+    if (p0Month !== undefined) {
+      const day = parseInt(dashParts[1], 10) || 1;
+      return new Date(currentYear, p0Month, day);
+    }
+    if (p1Month !== undefined) {
+      const day = parseInt(dashParts[0], 10) || 1;
+      return new Date(currentYear, p1Month, day);
+    }
+    const d0 = parseInt(dashParts[0], 10);
+    const m1 = parseInt(dashParts[1], 10) - 1;
+    if (!isNaN(d0) && !isNaN(m1)) {
+      return new Date(currentYear, m1, d0);
+    }
+  }
+
+  // Case 3: Compact format e.g. "aug1" or "1aug" or "sept1"
+  const alphaNumMatch = trimmed.match(/^([a-zA-Z]+)(\d+)$/);
+  if (alphaNumMatch) {
+    const mStr = alphaNumMatch[1].toLowerCase().slice(0, 3);
+    const m = MONTH_MAP[mStr];
+    const day = parseInt(alphaNumMatch[2], 10) || 1;
+    if (m !== undefined) {
+      return new Date(new Date().getFullYear(), m, day);
+    }
+  }
+  const numAlphaMatch = trimmed.match(/^(\d+)([a-zA-Z]+)$/);
+  if (numAlphaMatch) {
+    const day = parseInt(numAlphaMatch[1], 10) || 1;
+    const mStr = numAlphaMatch[2].toLowerCase().slice(0, 3);
+    const m = MONTH_MAP[mStr];
+    if (m !== undefined) {
+      return new Date(new Date().getFullYear(), m, day);
     }
   }
 
@@ -1330,124 +1533,103 @@ export async function getPaymentsForFlat(
   try {
     const db = await getDatabase();
     const now = new Date().toISOString();
+    const flatVariants = getFlatNumberVariants(cleanFlatNumber);
+    const flatPlaceholders = flatVariants.map(() => '?').join(', ');
 
-    // Look up active tenant for this flat
+    // Look up active tenant for this flat using all flat number variants
     const tenant = await db.getFirstAsync<Tenant>(
-      'SELECT * FROM tenants WHERE property_id = ? AND (flat_number = ? OR flat_number = ?) AND is_occupied = 1',
-      [numPropId, cleanFlatNumber, rawFlatNumber]
+      `SELECT * FROM tenants WHERE property_id = ? AND flat_number IN (${flatPlaceholders}) AND is_occupied = 1 ORDER BY id DESC`,
+      [numPropId, ...flatVariants]
     );
     const effectiveRent = Number(tenant?.rent_amount || defaultRentAmount) || 5000;
     const effectiveDueDay = Number(tenant?.due_day || dueDay) || 5;
     const effectiveStartDate = String(tenant?.rent_start_date || rentStartDate || '');
 
     let records = await db.getAllAsync<PaymentRecord>(
-      'SELECT * FROM payments WHERE property_id = ? AND (flat_number = ? OR flat_number = ?) ORDER BY id DESC',
-      [numPropId, cleanFlatNumber, rawFlatNumber]
+      `SELECT * FROM payments WHERE property_id = ? AND flat_number IN (${flatPlaceholders}) ORDER BY id DESC`,
+      [numPropId, ...flatVariants]
     );
 
-    // If no payment history exists yet, generate a single initial month record from rent_start_date
+    const currentMonthYear = getMonthYearFromDate(new Date());
+    const startDateObj = effectiveStartDate ? parseDateSafe(effectiveStartDate) : new Date();
+    const startMonthYear = String(getMonthYearFromDate(startDateObj));
+    const tenantId = tenant ? Number(tenant.id) || 0 : 0;
+
+    // If no payment history exists yet, generate initial records from startMonthYear up to currentMonthYear
     if (records.length === 0) {
-      const startDate = parseDateSafe(effectiveStartDate);
-      const startMonthYear = String(getMonthYearFromDate(startDate));
-      const dueDateStr = String(formatDueDateForMonth(startMonthYear, effectiveDueDay));
-      const tenantId = tenant ? Number(tenant.id) || 0 : 0;
-
-      await db.runAsync(
-        `INSERT INTO payments (property_id, flat_number, tenant_id, month_year, amount, total_amount, paid_amount, date_paid, due_date, notes, status, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, 0, '', ?, '', 'Pending', ?, ?)`,
-        [
-          numPropId,
-          cleanFlatNumber,
-          tenantId,
-          startMonthYear,
-          effectiveRent,
-          effectiveRent,
-          dueDateStr,
-          now,
-          now,
-        ]
-      );
-
-      records = await db.getAllAsync<PaymentRecord>(
-        'SELECT * FROM payments WHERE property_id = ? AND flat_number = ? ORDER BY id DESC',
-        [numPropId, cleanFlatNumber]
-      );
-    } else {
-      // If there is only 1 pending record with 0 payments and tenant has a rent_start_date, align it
-      if (
-        records.length === 1 &&
-        records[0].status === 'Pending' &&
-        (records[0].paid_amount || 0) === 0 &&
-        effectiveStartDate
-      ) {
-        const expectedMonth = String(getMonthYearFromDate(parseDateSafe(effectiveStartDate)));
-        if (records[0].month_year !== expectedMonth) {
-          const expectedDueDate = String(formatDueDateForMonth(expectedMonth, effectiveDueDay));
-          const recTenantId = tenant ? Number(tenant.id) || 0 : Number(records[0].tenant_id) || 0;
-          await db.runAsync(
-            `UPDATE payments 
-             SET month_year = ?, due_date = ?, amount = ?, total_amount = ?, tenant_id = ?, updated_at = ?
-             WHERE id = ?`,
-            [
-              expectedMonth,
-              expectedDueDate,
-              effectiveRent,
-              effectiveRent,
-              recTenantId,
-              now,
-              Number(records[0].id),
-            ]
-          );
-
-          records = await db.getAllAsync<PaymentRecord>(
-            'SELECT * FROM payments WHERE property_id = ? AND flat_number = ? ORDER BY id DESC',
-            [numPropId, cleanFlatNumber]
-          );
-        }
+      let cur = startMonthYear;
+      const targetEnd = compareMonthYear(currentMonthYear, startMonthYear) >= 0 ? currentMonthYear : startMonthYear;
+      while (compareMonthYear(cur, targetEnd) <= 0) {
+        const dueDateStr = String(formatDueDateForMonth(cur, effectiveDueDay));
+        await db.runAsync(
+          `INSERT INTO payments (property_id, flat_number, tenant_id, month_year, amount, total_amount, paid_amount, date_paid, due_date, notes, status, created_at, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?, 0, '', ?, '', 'Pending', ?, ?)`,
+          [
+            numPropId,
+            cleanFlatNumber,
+            tenantId,
+            cur,
+            effectiveRent,
+            effectiveRent,
+            dueDateStr,
+            now,
+            now,
+          ]
+        );
+        cur = String(getNextMonthYear(cur));
       }
 
-      // Ensure all elapsed calendar months up to the current month exist as Pending records
-      const currentMonthYear = getMonthYearFromDate(new Date());
-      let sorted = [...records].sort((a, b) => compareMonthYear(a.month_year, b.month_year));
-      let lastMonthRec = sorted[sorted.length - 1];
-
-      while (lastMonthRec && compareMonthYear(lastMonthRec.month_year, currentMonthYear) < 0) {
-        const nextMonth = String(getNextMonthYear(lastMonthRec.month_year));
+      records = await db.getAllAsync<PaymentRecord>(
+        `SELECT * FROM payments WHERE property_id = ? AND flat_number IN (${flatPlaceholders}) ORDER BY id DESC`,
+        [numPropId, ...flatVariants]
+      );
+    } else {
+      // 1. Ensure all elapsed calendar months from startMonthYear through currentMonthYear exist as records
+      let cur = startMonthYear;
+      const targetEnd = compareMonthYear(currentMonthYear, startMonthYear) >= 0 ? currentMonthYear : startMonthYear;
+      while (compareMonthYear(cur, targetEnd) <= 0) {
         const exists = records.some(
-          (r) => r.month_year.trim().toLowerCase() === nextMonth.trim().toLowerCase()
+          (r) => r.month_year.trim().toLowerCase() === cur.trim().toLowerCase()
         );
         if (!exists) {
-          const nextDueDate = String(formatDueDateForMonth(nextMonth, effectiveDueDay));
-          const nextTenantId = tenant ? Number(tenant.id) || 0 : 0;
+          const dueDateStr = String(formatDueDateForMonth(cur, effectiveDueDay));
           await db.runAsync(
             `INSERT INTO payments (property_id, flat_number, tenant_id, month_year, amount, total_amount, paid_amount, date_paid, due_date, notes, status, created_at, updated_at)
              VALUES (?, ?, ?, ?, ?, ?, 0, '', ?, '', 'Pending', ?, ?)`,
             [
               numPropId,
               cleanFlatNumber,
-              nextTenantId,
-              nextMonth,
+              tenantId,
+              cur,
               effectiveRent,
               effectiveRent,
-              nextDueDate,
+              dueDateStr,
               now,
               now,
             ]
           );
+        }
+        cur = String(getNextMonthYear(cur));
+      }
 
-          records = await db.getAllAsync<PaymentRecord>(
-            'SELECT * FROM payments WHERE property_id = ? AND flat_number = ? ORDER BY id DESC',
-            [numPropId, cleanFlatNumber]
-          );
-          sorted = [...records].sort((a, b) => compareMonthYear(a.month_year, b.month_year));
-          lastMonthRec = sorted[sorted.length - 1];
-        } else {
-          break;
+      // 2. If start date was moved forward to a later month, clean up any un-paid Pending records before the start date
+      for (const r of records) {
+        if (
+          compareMonthYear(r.month_year, startMonthYear) < 0 &&
+          r.status === 'Pending' &&
+          (r.paid_amount || 0) === 0
+        ) {
+          await db.runAsync('DELETE FROM payments WHERE id = ?', [r.id]);
         }
       }
 
-      // If the latest chronological month is Paid, and the next month is missing, spawn the next month as Pending
-      sorted = [...records].sort((a, b) => compareMonthYear(a.month_year, b.month_year));
+      records = await db.getAllAsync<PaymentRecord>(
+        `SELECT * FROM payments WHERE property_id = ? AND flat_number IN (${flatPlaceholders}) ORDER BY id DESC`,
+        [numPropId, ...flatVariants]
+      );
+
+      // 3. If the latest chronological month is Paid, and the next month is missing, spawn the next month as Pending
+      const sorted = [...records].sort((a, b) => compareMonthYear(a.month_year, b.month_year));
       const latest = sorted[sorted.length - 1];
       if (latest && latest.status === 'Paid') {
         const nextMonth = String(getNextMonthYear(latest.month_year));
@@ -1456,14 +1638,13 @@ export async function getPaymentsForFlat(
         );
         if (!exists) {
           const nextDueDate = String(formatDueDateForMonth(nextMonth, effectiveDueDay));
-          const nextTenantId = tenant ? Number(tenant.id) || 0 : 0;
           await db.runAsync(
             `INSERT INTO payments (property_id, flat_number, tenant_id, month_year, amount, total_amount, paid_amount, date_paid, due_date, notes, status, created_at, updated_at)
              VALUES (?, ?, ?, ?, ?, ?, 0, '', ?, '', 'Pending', ?, ?)`,
             [
               numPropId,
               cleanFlatNumber,
-              nextTenantId,
+              tenantId,
               nextMonth,
               effectiveRent,
               effectiveRent,
@@ -1474,8 +1655,8 @@ export async function getPaymentsForFlat(
           );
 
           records = await db.getAllAsync<PaymentRecord>(
-            'SELECT * FROM payments WHERE property_id = ? AND flat_number = ? ORDER BY id DESC',
-            [numPropId, cleanFlatNumber]
+            `SELECT * FROM payments WHERE property_id = ? AND flat_number IN (${flatPlaceholders}) ORDER BY id DESC`,
+            [numPropId, ...flatVariants]
           );
         }
       }
@@ -1484,22 +1665,68 @@ export async function getPaymentsForFlat(
     let allTx: PaymentTransaction[] = [];
     try {
       allTx = await db.getAllAsync<PaymentTransaction>(
-        'SELECT * FROM payment_transactions WHERE property_id = ? AND flat_number = ? ORDER BY id ASC',
-        [numPropId, cleanFlatNumber]
+        `SELECT * FROM payment_transactions WHERE property_id = ? AND flat_number IN (${flatPlaceholders}) ORDER BY id ASC`,
+        [numPropId, ...flatVariants]
       );
     } catch {
       allTx = [];
     }
 
-    return records.map((r) => {
+    // Deduplicate records by month_year so each calendar month has only ONE payment item!
+    const uniqueMap = new Map<string, PaymentRecord>();
+    for (const r of records) {
+      const key = r.month_year.trim().toLowerCase();
+      if (!uniqueMap.has(key)) {
+        uniqueMap.set(key, r);
+      } else {
+        const existing = uniqueMap.get(key)!;
+        const rTime = r.updated_at ? new Date(r.updated_at).getTime() : 0;
+        const existTime = existing.updated_at ? new Date(existing.updated_at).getTime() : 0;
+        if (rTime > existTime) {
+          uniqueMap.set(key, r);
+          if (existing.id) {
+            db.runAsync('DELETE FROM payments WHERE id = ?', [existing.id]).catch(() => {});
+          }
+        } else {
+          if (r.id) {
+            db.runAsync('DELETE FROM payments WHERE id = ?', [r.id]).catch(() => {});
+          }
+        }
+      }
+    }
+    const dedupedRecords = Array.from(uniqueMap.values());
+
+    return dedupedRecords.map((r) => {
       const total = Number(r.total_amount || r.amount || effectiveRent) || effectiveRent;
-      const paid = r.paid_amount !== undefined
+      let txList = allTx.filter(
+        (t) => (t.payment_id && t.payment_id === r.id) || t.month_year.trim().toLowerCase() === r.month_year.trim().toLowerCase()
+      );
+      // Deduplicate transactions by id or (amount + date_paid)
+      const seenTx = new Set<string>();
+      txList = txList.filter((tx) => {
+        const key = tx.id ? `id-${tx.id}` : `${tx.amount}-${tx.date_paid}-${tx.notes}`;
+        if (seenTx.has(key)) return false;
+        seenTx.add(key);
+        return true;
+      });
+
+      const txSum = txList.reduce((sum, t) => sum + (Number(t.amount) || 0), 0);
+      const rawPaid = r.paid_amount !== undefined
         ? Number(r.paid_amount) || 0
         : (r.status === 'Paid' ? total : 0);
-      let txList = allTx.filter(
-        (t) => t.payment_id === r.id || t.month_year.trim().toLowerCase() === r.month_year.trim().toLowerCase()
-      );
-      if (txList.length === 0 && (r.status === 'Paid' || (r.paid_amount !== undefined && r.paid_amount > 0))) {
+      const paid = Math.max(rawPaid, txSum);
+      const isPaid = (r.status === 'Paid' && paid > 0) || (total > 0 && paid >= total);
+      const status: 'Paid' | 'Partial' | 'Pending' = isPaid ? 'Paid' : (paid > 0 ? 'Partial' : 'Pending');
+
+      // Heal desynced SQLite record in background
+      if ((r.paid_amount !== paid || r.status !== status) && r.id) {
+        db.runAsync(
+          'UPDATE payments SET paid_amount = ?, status = ?, updated_at = ? WHERE id = ?',
+          [paid, status, new Date().toISOString(), r.id]
+        ).catch(() => {});
+      }
+
+      if (txList.length === 0 && (status === 'Paid' || paid > 0)) {
         const cleanD = r.date_paid ? r.date_paid.replace(/^Paid\s+/i, '').trim() : '';
         txList = [
           {
@@ -1517,6 +1744,7 @@ export async function getPaymentsForFlat(
       }
       return {
         ...r,
+        status,
         total_amount: total,
         paid_amount: paid,
         transactions: txList,
@@ -1604,8 +1832,8 @@ export async function markPaymentAsPaid(
 
   while (remainingMoney > 0) {
     let rec = await db.getFirstAsync<PaymentRecord>(
-      'SELECT * FROM payments WHERE property_id = ? AND flat_number = ? AND month_year = ?',
-      [propertyId, cleanFlatNumber, currentMonth]
+      'SELECT * FROM payments WHERE property_id = ? AND (flat_number = ? OR flat_number = ?) AND month_year = ?',
+      [propertyId, cleanFlatNumber, rawFlatNumber, currentMonth]
     );
 
     if (!rec) {
@@ -1690,8 +1918,8 @@ export async function markPaymentAsPaid(
   if (lastAffected && lastAffected.status === 'Paid') {
     const nextMonth = getNextMonthYear(lastAffected.month);
     const existingNext = await db.getFirstAsync<PaymentRecord>(
-      'SELECT * FROM payments WHERE property_id = ? AND flat_number = ? AND month_year = ?',
-      [propertyId, cleanFlatNumber, nextMonth]
+      'SELECT * FROM payments WHERE property_id = ? AND (flat_number = ? OR flat_number = ?) AND month_year = ?',
+      [propertyId, cleanFlatNumber, rawFlatNumber, nextMonth]
     );
 
     if (!existingNext) {
@@ -1842,18 +2070,26 @@ export async function deletePaymentTransaction(
 ): Promise<void> {
   const db = await getDatabase();
   const now = new Date().toISOString();
+  const flatVariants = getFlatNumberVariants(flatNumber);
+  const placeholders = flatVariants.map(() => '?').join(', ');
+  const cleanMonth = monthYear.trim();
 
   await db.runAsync('DELETE FROM payment_transactions WHERE id = ?', [transactionId]);
+  await notifyTransactionDeleted(transactionId);
 
   const existing = await db.getFirstAsync<PaymentRecord>(
-    'SELECT * FROM payments WHERE property_id = ? AND flat_number = ? AND month_year = ?',
-    [propertyId, flatNumber.trim(), monthYear.trim()]
+    `SELECT * FROM payments 
+     WHERE property_id = ? AND flat_number IN (${placeholders}) 
+     AND (month_year = ? OR LOWER(TRIM(month_year)) = LOWER(?))`,
+    [propertyId, ...flatVariants, cleanMonth, cleanMonth]
   );
 
   if (existing) {
     const txSum = await db.getFirstAsync<{ sum: number }>(
-      'SELECT SUM(amount) as sum FROM payment_transactions WHERE property_id = ? AND flat_number = ? AND month_year = ?',
-      [propertyId, flatNumber.trim(), monthYear.trim()]
+      `SELECT SUM(amount) as sum FROM payment_transactions 
+       WHERE (property_id = ? OR property_id = 0) AND flat_number IN (${placeholders}) 
+       AND (month_year = ? OR LOWER(TRIM(month_year)) = LOWER(?))`,
+      [propertyId, ...flatVariants, cleanMonth, cleanMonth]
     );
     const newPaidAmount = txSum && txSum.sum !== null ? Number(txSum.sum) : 0;
     const totalAmount = existing.total_amount || existing.amount || 5000;
@@ -1861,8 +2097,10 @@ export async function deletePaymentTransaction(
       newPaidAmount >= totalAmount ? 'Paid' : newPaidAmount > 0 ? 'Partial' : 'Pending';
 
     const latestTx = await db.getFirstAsync<PaymentTransaction>(
-      'SELECT * FROM payment_transactions WHERE property_id = ? AND flat_number = ? AND month_year = ? ORDER BY id DESC',
-      [propertyId, flatNumber.trim(), monthYear.trim()]
+      `SELECT * FROM payment_transactions 
+       WHERE (property_id = ? OR property_id = 0) AND flat_number IN (${placeholders}) 
+       AND (month_year = ? OR LOWER(TRIM(month_year)) = LOWER(?)) ORDER BY id DESC`,
+      [propertyId, ...flatVariants, cleanMonth, cleanMonth]
     );
     const finalPaidDate = latestTx?.date_paid ? `Paid ${latestTx.date_paid.replace(/^Paid\s+/i, '').trim()}` : '';
     const finalNotes = latestTx?.notes || '';
@@ -1873,6 +2111,18 @@ export async function deletePaymentTransaction(
        WHERE id = ?`,
       [newPaidAmount, newStatus, finalPaidDate, finalNotes, now, existing.id]
     );
+
+    if (newPaidAmount === 0) {
+      await notifyPaymentReset(
+        propertyId,
+        flatNumber.trim(),
+        formatFlatNumber(flatNumber),
+        cleanMonth,
+        [transactionId],
+        [existing.id],
+        flatVariants
+      );
+    }
   }
 
   notifyChange();
@@ -1885,38 +2135,90 @@ export async function deleteFullPayment(
 ): Promise<void> {
   const db = await getDatabase();
   const now = new Date().toISOString();
+  const normFlat = formatFlatNumber(flatNumber);
+  const flatVariants = getFlatNumberVariants(flatNumber);
+  const placeholders = flatVariants.map(() => '?').join(', ');
+  const cleanMonth = monthYear.trim();
 
-  // 1. Delete all transactions for this payment / month
-  await db.runAsync(
-    'DELETE FROM payment_transactions WHERE property_id = ? AND flat_number = ? AND month_year = ?',
-    [propertyId, flatNumber.trim(), monthYear.trim()]
+  // Find all matching payment IDs for this flat and month
+  const matchingPayments = await db.getAllAsync<{ id: number }>(
+    `SELECT id FROM payments 
+     WHERE property_id = ? AND flat_number IN (${placeholders}) 
+     AND (month_year = ? OR LOWER(TRIM(month_year)) = LOWER(?))`,
+    [propertyId, ...flatVariants, cleanMonth, cleanMonth]
   );
+  const paymentIds = matchingPayments.map((p) => p.id);
+
+  // Find all matching transaction IDs
+  let txQuery = `SELECT id FROM payment_transactions 
+                 WHERE (property_id = ? OR property_id = 0) 
+                 AND (flat_number IN (${placeholders}) AND (month_year = ? OR LOWER(TRIM(month_year)) = LOWER(?)))`;
+  const txParams: any[] = [propertyId, ...flatVariants, cleanMonth, cleanMonth];
+  if (paymentIds.length > 0) {
+    const payPlaceholders = paymentIds.map(() => '?').join(', ');
+    txQuery += ` OR payment_id IN (${payPlaceholders})`;
+    txParams.push(...paymentIds);
+  }
+  const matchingTx = await db.getAllAsync<{ id: number }>(txQuery, txParams);
+  const txIds = matchingTx.map((t) => t.id);
+
+  // 1. Delete all transactions locally
+  if (txIds.length > 0) {
+    const txPlaceholders = txIds.map(() => '?').join(', ');
+    await db.runAsync(`DELETE FROM payment_transactions WHERE id IN (${txPlaceholders})`, txIds);
+  }
+  await db.runAsync(
+    `DELETE FROM payment_transactions 
+     WHERE (property_id = ? OR property_id = 0) 
+     AND flat_number IN (${placeholders}) 
+     AND (month_year = ? OR LOWER(TRIM(month_year)) = LOWER(?))`,
+    [propertyId, ...flatVariants, cleanMonth, cleanMonth]
+  );
+  if (paymentIds.length > 0) {
+    const payPlaceholders = paymentIds.map(() => '?').join(', ');
+    await db.runAsync(`DELETE FROM payment_transactions WHERE payment_id IN (${payPlaceholders})`, paymentIds);
+  }
 
   // 2. Reset the payment record for this month to Pending with 0 paid
+  // If there are duplicate payment rows, delete the extra ones and keep just one
+  if (paymentIds.length > 1) {
+    const duplicateIds = paymentIds.slice(1);
+    const dupPlaceholders = duplicateIds.map(() => '?').join(', ');
+    await db.runAsync(`DELETE FROM payments WHERE id IN (${dupPlaceholders})`, duplicateIds);
+  }
+
   await db.runAsync(
     `UPDATE payments 
      SET paid_amount = 0, status = 'Pending', date_paid = '', notes = '', updated_at = ?
-     WHERE property_id = ? AND flat_number = ? AND month_year = ?`,
-    [now, propertyId, flatNumber.trim(), monthYear.trim()]
+     WHERE property_id = ? AND flat_number IN (${placeholders}) 
+     AND (month_year = ? OR LOWER(TRIM(month_year)) = LOWER(?))`,
+    [now, propertyId, ...flatVariants, cleanMonth, cleanMonth]
   );
 
   // 3. If the chronologically next month was spawned as Pending with 0 payments, clean it up
-  const nextMonth = getNextMonthYear(monthYear.trim());
-  const nextRec = await db.getFirstAsync<PaymentRecord>(
-    'SELECT * FROM payments WHERE property_id = ? AND flat_number = ? AND month_year = ?',
-    [propertyId, flatNumber.trim(), nextMonth]
+  const nextMonth = getNextMonthYear(cleanMonth);
+  const nextRecs = await db.getAllAsync<PaymentRecord>(
+    `SELECT * FROM payments 
+     WHERE property_id = ? AND flat_number IN (${placeholders}) 
+     AND (month_year = ? OR LOWER(TRIM(month_year)) = LOWER(?))`,
+    [propertyId, ...flatVariants, nextMonth, nextMonth]
   );
-  if (nextRec && nextRec.status === 'Pending' && (nextRec.paid_amount || 0) === 0) {
-    const nextTxCount = await db.getFirstAsync<{ count: number }>(
-      'SELECT COUNT(*) as count FROM payment_transactions WHERE property_id = ? AND flat_number = ? AND month_year = ?',
-      [propertyId, flatNumber.trim(), nextMonth]
-    );
-    if (!nextTxCount || nextTxCount.count === 0) {
-      await db.runAsync('DELETE FROM payments WHERE id = ?', [nextRec.id]);
-      notifyPaymentDeleted(nextRec.id);
+  for (const nextRec of nextRecs) {
+    if (nextRec && nextRec.status === 'Pending' && (nextRec.paid_amount || 0) === 0) {
+      const nextTxCount = await db.getFirstAsync<{ count: number }>(
+        `SELECT COUNT(*) as count FROM payment_transactions 
+         WHERE (property_id = ? OR property_id = 0) AND flat_number IN (${placeholders}) 
+         AND (month_year = ? OR LOWER(TRIM(month_year)) = LOWER(?))`,
+        [propertyId, ...flatVariants, nextMonth, nextMonth]
+      );
+      if (!nextTxCount || nextTxCount.count === 0) {
+        await db.runAsync('DELETE FROM payments WHERE id = ?', [nextRec.id]);
+        notifyPaymentDeleted(nextRec.id);
+      }
     }
   }
 
+  await notifyPaymentReset(propertyId, flatNumber.trim(), normFlat, cleanMonth, txIds, paymentIds, flatVariants);
   notifyChange();
 }
 
@@ -1945,6 +2247,31 @@ export async function getAllPaymentsForProperty(propertyId: number): Promise<Pay
       [propertyId]
     );
 
+    // Deduplicate records by flat and month_year using updated_at timestamp
+    const uniqueMap = new Map<string, PaymentRecord>();
+    for (const r of records) {
+      const normFlat = formatFlatNumber(r.flat_number);
+      const key = `${normFlat.toLowerCase()}:${r.month_year.trim().toLowerCase()}`;
+      if (!uniqueMap.has(key)) {
+        uniqueMap.set(key, r);
+      } else {
+        const existing = uniqueMap.get(key)!;
+        const rTime = r.updated_at ? new Date(r.updated_at).getTime() : 0;
+        const existTime = existing.updated_at ? new Date(existing.updated_at).getTime() : 0;
+        if (rTime > existTime) {
+          uniqueMap.set(key, r);
+          if (existing.id) {
+            db.runAsync('DELETE FROM payments WHERE id = ?', [existing.id]).catch(() => {});
+          }
+        } else {
+          if (r.id) {
+            db.runAsync('DELETE FROM payments WHERE id = ?', [r.id]).catch(() => {});
+          }
+        }
+      }
+    }
+    const dedupedRecords = Array.from(uniqueMap.values());
+
     let allTx: PaymentTransaction[] = [];
     try {
       allTx = await db.getAllAsync<PaymentTransaction>(
@@ -1955,12 +2282,25 @@ export async function getAllPaymentsForProperty(propertyId: number): Promise<Pay
       allTx = [];
     }
 
-    return records.map((r) => {
+    return dedupedRecords.map((r) => {
       const total = r.total_amount || r.amount || 0;
-      const paid = r.paid_amount !== undefined ? r.paid_amount : (r.status === 'Paid' ? total : 0);
       const txs = allTx.filter((t) => t.payment_id === r.id);
+      const txSum = txs.reduce((sum, t) => sum + (Number(t.amount) || 0), 0);
+      const rawPaid = r.paid_amount !== undefined ? r.paid_amount : (r.status === 'Paid' ? total : 0);
+      const paid = Math.max(rawPaid, txSum);
+      const isPaid = r.status === 'Paid' || (total > 0 && paid >= total);
+      const status: 'Paid' | 'Partial' | 'Pending' = isPaid ? 'Paid' : (paid > 0 ? 'Partial' : (r.status || 'Pending'));
+
+      if ((r.paid_amount !== paid || r.status !== status) && r.id) {
+        db.runAsync(
+          'UPDATE payments SET paid_amount = ?, status = ?, updated_at = ? WHERE id = ?',
+          [paid, status, new Date().toISOString(), r.id]
+        ).catch(() => {});
+      }
+
       return {
         ...r,
+        status,
         total_amount: total,
         paid_amount: paid,
         transactions: txs,

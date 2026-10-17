@@ -99,7 +99,7 @@ export default function AppDatePicker({
   return (
     <View style={styles.overlay}>
       <TouchableOpacity
-        style={StyleSheet.absoluteFillObject}
+        style={StyleSheet.absoluteFill}
         activeOpacity={1}
         onPress={onClose}
       />
@@ -147,7 +147,7 @@ export default function AppDatePicker({
 
 const styles = StyleSheet.create({
   overlay: {
-    ...StyleSheet.absoluteFillObject,
+    ...StyleSheet.absoluteFill,
     backgroundColor: 'rgba(15, 23, 42, 0.5)',
     justifyContent: 'flex-end',
     zIndex: 99999,
